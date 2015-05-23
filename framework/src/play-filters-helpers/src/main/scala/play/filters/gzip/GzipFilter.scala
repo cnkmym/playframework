@@ -1,15 +1,17 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.filters.gzip
 
+import javax.inject.{ Provider, Inject, Singleton }
+
+import com.typesafe.config.ConfigMemorySize
+import play.api.inject.Module
+import play.api.{ Environment, PlayConfig, Configuration }
 import play.api.libs.iteratee._
 import play.api.mvc._
 import scala.concurrent.Future
-import play.api.mvc.SimpleResult
-import play.api.mvc.ResponseHeader
 import play.api.mvc.RequestHeader.acceptHeader
-import org.jboss.netty.handler.codec.http.HttpHeaders.Names
 import play.api.http.{ Status, MimeTypes }
 import play.api.libs.concurrent.Execution.Implicits._
 
@@ -35,36 +37,16 @@ import play.api.libs.concurrent.Execution.Implicits._
  * of the response.  Otherwise, it will buffer up to the configured chunkedThreshold, which defaults to 100kb.  If the
  * response fits in that buffer, the filter will send the content length, otherwise it falls back to sending a chunked
  * response, or if the protocol is HTTP/1.0, it closes the connection at the end of the response.
- *
- * You can use this filter in your project simply by including it in the Global filters, like this:
- *
- * {{{
- * object Global extends WithFilters(new GzipFilter()) {
- *   ...
- * }
- * }}}
- *
- * @param gzip The gzip enumeratee to use.
- * @param chunkedThreshold The content length threshold, after which the filter will switch to chunking the result.
- * @param shouldGzip Whether the given request/result should be gzipped.  This can be used, for example, to implement
- *                   black/white lists for gzipping by content type.
  */
-class GzipFilter(gzip: Enumeratee[Array[Byte], Array[Byte]] = Gzip.gzip(GzipFilter.DefaultChunkSize),
-    chunkedThreshold: Int = GzipFilter.DefaultChunkedThreshold,
-    shouldGzip: (RequestHeader, ResponseHeader) => Boolean = (_, _) => true) extends EssentialFilter {
+@Singleton
+class GzipFilter @Inject() (config: GzipFilterConfig) extends EssentialFilter {
 
   import play.api.http.HeaderNames._
   import play.api.http.HttpProtocol._
 
-  /**
-   * Allows use with a custom chunked threshold from Java
-   */
-  def this(chunkedThreshold: Int) = this(Gzip.gzip(GzipFilter.DefaultChunkSize), chunkedThreshold, (_, _) => true)
-
-  /**
-   * This allows it to be used from Java
-   */
-  def this() = this(GzipFilter.DefaultChunkedThreshold)
+  def this(gzip: Enumeratee[Array[Byte], Array[Byte]] = Gzip.gzip(8192),
+    chunkedThreshold: Int = 102400,
+    shouldGzip: (RequestHeader, ResponseHeader) => Boolean = (_, _) => true) = this(GzipFilterConfig(gzip, chunkedThreshold, shouldGzip))
 
   def apply(next: EssentialAction) = new EssentialAction {
     def apply(request: RequestHeader) = {
@@ -76,13 +58,13 @@ class GzipFilter(gzip: Enumeratee[Array[Byte], Array[Byte]] = Gzip.gzip(GzipFilt
     }
   }
 
-  private def handleResult(request: RequestHeader, result: SimpleResult): Future[SimpleResult] = {
-    if (shouldCompress(result.header) && shouldGzip(request, result.header)) {
+  private def handleResult(request: RequestHeader, result: Result): Future[Result] = {
+    if (shouldCompress(result.header) && config.shouldGzip(request, result.header)) {
       // If connection is close, don't bother buffering it, we can send it without a content length
       if (result.connection == HttpConnection.Close) {
-        Future.successful(SimpleResult(
+        Future.successful(Result(
           header = result.header.copy(headers = setupHeader(result.header.headers)),
-          body = result.body &> gzip,
+          body = result.body &> config.gzip,
           connection = result.connection
         ))
       } else {
@@ -94,7 +76,7 @@ class GzipFilter(gzip: Enumeratee[Array[Byte], Array[Byte]] = Gzip.gzip(GzipFilt
           Cont {
             case Input.EOF => Done(Right((chunks.reverse, count)), Input.EOF)
             // If we have 10 or less bytes already, then we have so far only seen the gzip header
-            case Input.El(data) if count <= GzipFilter.GzipHeaderLength || count + data.length < chunkedThreshold =>
+            case Input.El(data) if count <= GzipFilter.GzipHeaderLength || count + data.length < config.chunkedThreshold =>
               buffer(data :: chunks, count + data.length)
             case Input.El(data) => Done(Left((data :: chunks).reverse))
             case Input.Empty => buffer(chunks, count)
@@ -102,10 +84,10 @@ class GzipFilter(gzip: Enumeratee[Array[Byte], Array[Byte]] = Gzip.gzip(GzipFilt
         }
 
         // Run the enumerator partially (means we get an enumerator that contains the rest of the input)
-        Concurrent.runPartial(result.body &> gzip, buffer(Nil, 0)).map {
+        Concurrent.runPartial(result.body &> config.gzip, buffer(Nil, 0)).map {
           // We successfully buffered the whole thing, so we have a content length
           case (Right((chunks, contentLength)), empty) =>
-            SimpleResult(
+            Result(
               header = result.header.copy(headers = setupHeader(result.header.headers)
                 + (CONTENT_LENGTH -> Integer.toString(contentLength))),
               // include the empty enumerator so that it's fully consumed
@@ -117,14 +99,14 @@ class GzipFilter(gzip: Enumeratee[Array[Byte], Array[Byte]] = Gzip.gzip(GzipFilt
           case (Left(chunks), remaining) => {
             if (request.version == HTTP_1_0) {
               // Don't chunk for HTTP/1.0
-              SimpleResult(
+              Result(
                 header = result.header.copy(headers = setupHeader(result.header.headers)),
                 body = Enumerator.enumerate(chunks) >>> remaining,
                 connection = HttpConnection.Close
               )
             } else {
               // Otherwise chunk
-              SimpleResult(
+              Result(
                 header = result.header.copy(headers = setupHeader(result.header.headers)
                   + (TRANSFER_ENCODING -> CHUNKED)),
                 body = (Enumerator.enumerate(chunks) >>> remaining) &> Results.chunk,
@@ -184,10 +166,10 @@ class GzipFilter(gzip: Enumeratee[Array[Byte], Array[Byte]] = Gzip.gzip(GzipFilt
   /**
    * Of course, we don't want to double compress responses
    */
-  private def isNotAlreadyCompressed(header: ResponseHeader) = header.headers.get(Names.CONTENT_ENCODING).isEmpty
+  private def isNotAlreadyCompressed(header: ResponseHeader) = header.headers.get(CONTENT_ENCODING).isEmpty
 
   private def setupHeader(header: Map[String, String]): Map[String, String] = {
-    header.filterNot(_._1 == Names.CONTENT_LENGTH) + (Names.CONTENT_ENCODING -> "gzip") + addToVaryHeader(header, Names.VARY, Names.ACCEPT_ENCODING)
+    header.filterNot(_._1 == CONTENT_LENGTH) + (CONTENT_ENCODING -> "gzip") + addToVaryHeader(header, VARY, ACCEPT_ENCODING)
   }
 
   /**
@@ -196,16 +178,65 @@ class GzipFilter(gzip: Enumeratee[Array[Byte], Array[Byte]] = Gzip.gzip(GzipFilt
   private def addToVaryHeader(existingHeaders: Map[String, String], headerName: String, headerValue: String): (String, String) = {
     existingHeaders.get(headerName) match {
       case None => (headerName, headerValue)
+      case Some(existing) if (existing.split(",").exists(_.trim.equalsIgnoreCase(headerValue))) => (headerName, existing)
       case Some(existing) => (headerName, s"$existing,$headerValue")
     }
   }
 }
 
 object GzipFilter {
-  /** Default threshold before chunking happens is 100kb */
-  private val DefaultChunkedThreshold = 102400
-  /** The default buffer for gzip chunk size to use, 8kb matches plays default chunking size when streaming */
-  private val DefaultChunkSize = 8192
   /** The GZIP header length */
   private val GzipHeaderLength = 10
+}
+
+/**
+ * Configuration for the gzip filter
+ *
+ * @param gzip The gzip enumeratee to use.
+ * @param chunkedThreshold The content length threshold, after which the filter will switch to chunking the result.
+ * @param shouldGzip Whether the given request/result should be gzipped.  This can be used, for example, to implement
+ *                   black/white lists for gzipping by content type.
+ */
+case class GzipFilterConfig(gzip: Enumeratee[Array[Byte], Array[Byte]] = Gzip.gzip(8192),
+    chunkedThreshold: Int = 102400,
+    shouldGzip: (RequestHeader, ResponseHeader) => Boolean = (_, _) => true) {
+}
+
+object GzipFilterConfig {
+  def fromConfiguration(conf: Configuration) = {
+    val config = PlayConfig(conf).get[PlayConfig]("play.filters.gzip")
+
+    GzipFilterConfig(
+      gzip = Gzip.gzip(config.get[ConfigMemorySize]("bufferSize").toBytes.toInt),
+      chunkedThreshold = config.get[ConfigMemorySize]("chunkedThreshold").toBytes.toInt
+    )
+  }
+}
+
+/**
+ * The gzip filter configuration provider.
+ */
+@Singleton
+class GzipFilterConfigProvider @Inject() (config: Configuration) extends Provider[GzipFilterConfig] {
+  lazy val get = GzipFilterConfig.fromConfiguration(config)
+}
+
+/**
+ * The gzip filter module.
+ */
+class GzipFilterModule extends Module {
+  def bindings(environment: Environment, configuration: Configuration) = Seq(
+    bind[GzipFilterConfig].toProvider[GzipFilterConfigProvider],
+    bind[GzipFilter].toSelf
+  )
+}
+
+/**
+ * The gzip filter components.
+ */
+trait GzipFilterComponents {
+  def configuration: Configuration
+
+  lazy val gzipFilterConfig: GzipFilterConfig = GzipFilterConfig.fromConfiguration(configuration)
+  lazy val gzipFilter: GzipFilter = new GzipFilter(gzipFilterConfig)
 }

@@ -1,20 +1,24 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.api.libs.iteratee
 
 import org.specs2.mutable._
-import java.io.OutputStream
-import java.util.concurrent.{ CountDownLatch, TimeUnit }
-import scala.concurrent.{ ExecutionContext, Promise, Future, Await }
-import scala.util.{ Failure, Success, Try }
+import scala.concurrent.{ Future, ExecutionContext }
+import scala.util.{ Failure, Try }
 
 object IterateesSpec extends Specification
-  with IterateeSpecification with ExecutionSpecification {
+    with IterateeSpecification with ExecutionSpecification {
 
   def checkFoldResult[A, E](i: Iteratee[A, E], expected: Step[A, E]) = {
     mustExecute(1) { foldEC =>
       await(i.fold(s => Future.successful(s))(foldEC)) must equalTo(expected)
+    }
+  }
+
+  def checkFoldTryResult[A, E](i: Iteratee[A, E], expected: Try[Step[A, E]]) = {
+    mustExecute(0) { foldEC =>
+      Try(await(i.fold(s => Future.successful(s))(foldEC))) must equalTo(expected)
     }
   }
 
@@ -49,6 +53,12 @@ object IterateesSpec extends Specification
 
     "delegate folding to their promised iteratee" in {
       checkFoldResult(i, Step.Done(1, Input.El("x")))
+    }
+
+    "return errors in flattened failed future" in {
+      val ex = new Exception("exception message")
+      val flattenedFailedFuture = Iteratee.flatten(Future.failed(ex))
+      checkFoldTryResult[Nothing, Nothing](flattenedFailedFuture, Failure(ex))
     }
 
     "return immediate fold errors in promise" in {
@@ -195,6 +205,30 @@ object IterateesSpec extends Specification
       }
     }
 
+    "not overflow the stack when called recursively" in {
+      // Find how much recursion is needed to overflow the stack
+      // on the current Java runtime.
+      def overflows(n: Int): Boolean = {
+        def recurseTimes(n: Int): Unit = {
+          if (n == 0) () else identity(recurseTimes(n - 1))
+        }
+        try {
+          recurseTimes(n)
+          false // Didn't overflow
+        } catch {
+          case _: StackOverflowError => true
+        }
+      }
+      val overflowDepth: Int = (12 until 20).map(1 << _).find(overflows).get
+
+      import ExecutionContext.Implicits.global
+      val unitDone: Iteratee[Unit, Unit] = Done(())
+      val flatMapped: Iteratee[Unit, Unit] = (0 until overflowDepth).foldLeft[Iteratee[Unit, Unit]](Cont(_ => unitDone)) {
+        case (it, _) => it.flatMap(_ => unitDone)
+      }
+      await(await(flatMapped.feed(Input.EOF)).unflatten) must equalTo(Step.Done((), Input.Empty))
+    }
+
   }
 
   "Error iteratees" should {
@@ -289,6 +323,209 @@ object IterateesSpec extends Specification
 
   }
 
+  "Iteratee.recover" should {
+
+    val expected = "expected"
+    val unexpected = "should not be returned"
+
+    "do nothing on a Done iteratee" in {
+      mustExecute(1) { implicit foldEC =>
+        val it = done(expected).recover { case t: Throwable => unexpected }
+        val actual = await(Enumerator(unexpected) |>>> it)
+        actual must equalTo(expected)
+      }
+    }
+
+    "do nothing on an eventually Done iteratee" in {
+      mustExecute(1) { implicit foldEC =>
+        val it = delayed(done(expected)).recover { case t: Throwable => unexpected }
+        val actual = await(Enumerator(unexpected) |>>> it)
+        actual must equalTo(expected)
+      }
+    }
+
+    "recover with the expected fallback value from an Error iteratee" in {
+      mustExecute(2) { implicit foldEC =>
+        val it = error(unexpected).recover { case t: Throwable => expected }
+        val actual = await(Enumerator(unexpected) |>>> it)
+        actual must equalTo(expected)
+      }
+    }
+
+    "leave the Error iteratee unchanged if the Exception type doesn't match the partial function" in {
+      mustExecute(1) { implicit foldEC =>
+        val it = error(expected).recover { case t: IllegalArgumentException => unexpected }
+        val actual = await((Enumerator(unexpected) |>>> it).failed)
+        actual.getMessage must equalTo(expected)
+      }
+    }
+
+    "recover with the expected fallback value from an eventually Error iteratee" in {
+      mustExecute(2) { implicit foldEC =>
+        val it = delayed(error(unexpected)).recover { case t: Throwable => expected }
+        val actual = await(Enumerator(unexpected) |>>> it)
+        actual must equalTo(expected)
+      }
+    }
+
+    "recover with the expected fallback value from an iteratee that eventually throws an exception" in {
+      mustExecute(2) { implicit foldEC =>
+        val it = delayed(throw new RuntimeException(unexpected)).recover { case t: Throwable => expected }
+        val actual = await(Enumerator(unexpected) |>>> it)
+        actual must equalTo(expected)
+      }
+    }
+
+    "do nothing on a Cont iteratee that becomes Done with input" in {
+      mustExecute(2) { implicit foldEC =>
+        val it = cont(input => done(input)).recover { case t: Throwable => unexpected }
+        val actual = await(Enumerator(expected) |>>> it)
+        actual must equalTo(expected)
+      }
+    }
+
+    "do nothing on an eventually Cont iteratee that becomes Done with input" in {
+      mustExecute(2) { implicit foldEC =>
+        val it = delayed(cont(input => done(input))).recover { case t: Throwable => unexpected }
+        val actual = await(Enumerator(expected) |>>> it)
+        actual must equalTo(expected)
+      }
+    }
+
+    "do nothing on a Cont iteratee that eventually becomes Done with input" in {
+      mustExecute(2) { implicit foldEC =>
+        val it = cont(input => delayed(done(input))).recover { case t: Throwable => unexpected }
+        val actual = await(Enumerator(expected) |>>> it)
+        actual must equalTo(expected)
+      }
+    }
+
+    "do nothing on an Cont iteratee that eventually becomes Done with input after several steps" in {
+      mustExecute(4) { implicit foldEC =>
+        val it = delayed(
+          cont(input1 => delayed(
+            cont(input2 => delayed(
+              cont(input3 => delayed(
+                done(input1 + input2 + input3)
+              ))
+            ))
+          ))
+        ).recover { case t: Throwable => unexpected }
+        val actual = await(Enumerator(expected, expected, expected) |>>> it)
+        actual must equalTo(expected * 3)
+      }
+    }
+
+    "recover with the expected fallback value from a Cont iteratee that eventually becomes an Error iteratee after several steps" in {
+      mustExecute(5) { implicit foldEC =>
+        val it = delayed(
+          cont(input1 => delayed(
+            cont(input2 => delayed(
+              cont(input3 => delayed(
+                error(input1 + input2 + input3)
+              ))
+            ))
+          ))
+        ).recover { case t: Throwable => expected }
+        val actual = await(Enumerator(unexpected, unexpected, unexpected) |>>> it)
+        actual must equalTo(expected)
+      }
+    }
+  }
+
+  "Iteratee.recoverM" should {
+
+    val expected = "expected"
+    val unexpected = "should not be returned"
+
+    "do nothing on a Done iteratee" in {
+      mustExecute(1) { implicit foldEC =>
+        val it = done(expected).recoverM { case t: Throwable => Future.successful(unexpected) }
+        val actual = await(Enumerator(unexpected) |>>> it)
+        actual must equalTo(expected)
+      }
+    }
+
+    "do nothing on a Done iteratee even if the recover block gets a failed Future" in {
+      mustExecute(1) { implicit foldEC =>
+        val it = done(expected).recoverM { case t: Throwable => Future.failed(new RuntimeException(unexpected)) }
+        val actual = await(Enumerator(unexpected) |>>> it)
+        actual must equalTo(expected)
+      }
+    }
+
+    "recover with the expected fallback Future from an Error iteratee" in {
+      mustExecute(2) { implicit foldEC =>
+        val it = error(unexpected).recoverM { case t: Throwable => Future.successful(expected) }
+        val actual = await(Enumerator(unexpected) |>>> it)
+        actual must equalTo(expected)
+      }
+    }
+
+    "leave the Error iteratee unchanged if the Exception type doesn't match the partial function" in {
+      mustExecute(1) { implicit foldEC =>
+        val it = error(expected).recoverM { case t: IllegalArgumentException => Future.successful(unexpected) }
+        val actual = await((Enumerator(unexpected) |>>> it).failed)
+        actual.getMessage must equalTo(expected)
+      }
+    }
+
+    "return a failed Future if you try to recover from an Error iteratee with a failed Future" in {
+      mustExecute(2) { implicit foldEC =>
+        val exception = new RuntimeException(expected)
+        val it = error(unexpected).recoverM { case t: Throwable => Future.failed(exception) }
+        val actual = await((Enumerator(unexpected) |>>> it).failed)
+        actual must equalTo(exception)
+      }
+    }
+  }
+
+  "Iteratee.recoverWith" should {
+
+    val expected = "expected"
+    val unexpected = "should not be returned"
+
+    "do nothing on a Done iteratee" in {
+      mustExecute(1) { implicit foldEC =>
+        val it = done(expected).recoverWith { case t: Throwable => done(unexpected) }
+        val actual = await(Enumerator(unexpected) |>>> it)
+        actual must equalTo(expected)
+      }
+    }
+
+    "do nothing on a Done iteratee even if the recover block gets an error Iteratee" in {
+      mustExecute(1) { implicit foldEC =>
+        val it = done(expected).recoverWith { case t: Throwable => error(unexpected) }
+        val actual = await(Enumerator(unexpected) |>>> it)
+        actual must equalTo(expected)
+      }
+    }
+
+    "recover with the expected fallback Iteratee from an Error iteratee" in {
+      mustExecute(1) { implicit foldEC =>
+        val it = error(unexpected).recoverWith { case t: Throwable => done(expected) }
+        val actual = await(Enumerator(unexpected) |>>> it)
+        actual must equalTo(expected)
+      }
+    }
+
+    "leave the Error iteratee unchanged if the Exception type doesn't match the partial function" in {
+      mustExecute(1) { implicit foldEC =>
+        val it = error(expected).recoverWith { case t: IllegalArgumentException => done(unexpected) }
+        val actual = await((Enumerator(unexpected) |>>> it).failed)
+        actual.getMessage must equalTo(expected)
+      }
+    }
+
+    "return a failed Future if you try to recover from an Error iteratee with an Error iteratee" in {
+      mustExecute(1) { implicit foldEC =>
+        val it = error(unexpected).recoverWith { case t: Throwable => error(expected) }
+        val actual = await((Enumerator(unexpected) |>>> it).failed)
+        actual.getMessage must equalTo(expected)
+      }
+    }
+  }
+
   "Iteratee.consume" should {
 
     "return its concatenated input" in {
@@ -308,6 +545,115 @@ object IterateesSpec extends Specification
 
   }
 
+  "Iteratee.takeUpTo" should {
+
+    def takenAndNotTaken[E](n: Int): Iteratee[E, (Seq[E], Seq[E])] = {
+      import ExecutionContext.Implicits.global
+      for {
+        seq1 <- Iteratee.takeUpTo(n)
+        seq2 <- Iteratee.getChunks
+      } yield (seq1, seq2)
+    }
+
+    "take 0 elements from 0" in {
+      await(Enumerator() |>>> takenAndNotTaken(0)) must equalTo((Seq(), Seq()))
+    }
+
+    "take 0 elements from 0 when asked for 2" in {
+      await(Enumerator() |>>> takenAndNotTaken(2)) must equalTo((Seq(), Seq()))
+    }
+
+    "take 1 element from 2" in {
+      await(Enumerator(1, 2) |>>> takenAndNotTaken(1)) must equalTo((Seq(1), Seq(2)))
+    }
+
+    "take 2 elements from 2" in {
+      await(Enumerator(1, 2) |>>> takenAndNotTaken(2)) must equalTo((Seq(1, 2), Seq()))
+    }
+
+    "take 2 elements from 2 when asked for 3" in {
+      await(Enumerator(1, 2) |>>> takenAndNotTaken(3)) must equalTo((Seq(1, 2), Seq()))
+    }
+
+    "skip Input.Empty when taking elements" in {
+      val enum = Enumerator(1, 2) >>> Enumerator.enumInput(Input.Empty) >>> Enumerator(3, 4)
+      await(enum |>>> takenAndNotTaken(3)) must equalTo((Seq(1, 2, 3), Seq(4)))
+    }
+
+  }
+
+  "Iteratee.isEmpty" should {
+
+    def isEmptyThenRest[E]: Iteratee[E, (Boolean, Seq[E])] = {
+      import ExecutionContext.Implicits.global
+      for {
+        empty <- Iteratee.isEmpty
+        seq <- Iteratee.getChunks
+      } yield (empty, seq)
+    }
+
+    "be true for a stream with only EOF" in {
+      await(Enumerator() |>>> isEmptyThenRest) must equalTo((true, Seq()))
+    }
+
+    "be true for a stream with Empty and EOF" in {
+      val enum = Enumerator.enumInput(Input.Empty) >>> Enumerator.eof
+      await(enum |>>> isEmptyThenRest) must equalTo((true, Seq()))
+    }
+
+    "be false for a stream with one element" in {
+      await(Enumerator(1) |>>> isEmptyThenRest) must equalTo((false, Seq(1)))
+    }
+
+    "be false for a stream with two elements" in {
+      await(Enumerator(1, 2) |>>> isEmptyThenRest) must equalTo((false, Seq(1, 2)))
+    }
+
+    "be false for a stream with empty and element inputs" in {
+      val enum = Enumerator.enumInput(Input.Empty) >>> Enumerator(1, 2)
+      await(enum |>>> isEmptyThenRest) must equalTo((false, Seq(1, 2)))
+    }
+
+  }
+
+  "Iteratee.takeUpTo and Iteratee.isEmpty" should {
+
+    def process[E](n: Int): Iteratee[E, (Seq[E], Boolean, Seq[E])] = {
+      import ExecutionContext.Implicits.global
+      for {
+        seq1 <- Iteratee.takeUpTo(n)
+        emptyAfterSeq1 <- Iteratee.isEmpty
+        seq2 <- Iteratee.getChunks
+      } yield (seq1, emptyAfterSeq1, seq2)
+    }
+
+    "take 0 elements and be empty from 0" in {
+      await(Enumerator() |>>> process(0)) must equalTo((Seq(), true, Seq()))
+    }
+
+    "take 0 elements from 0 and be empty when asked for 2" in {
+      await(Enumerator() |>>> process(2)) must equalTo((Seq(), true, Seq()))
+    }
+
+    "take 1 element and not be empty from 2" in {
+      await(Enumerator(1, 2) |>>> process(1)) must equalTo((Seq(1), false, Seq(2)))
+    }
+
+    "take 2 elements and be empty from 2" in {
+      await(Enumerator(1, 2) |>>> process(2)) must equalTo((Seq(1, 2), true, Seq()))
+    }
+
+    "take 2 elements and be empty from 2 when asked for 3" in {
+      await(Enumerator(1, 2) |>>> process(3)) must equalTo((Seq(1, 2), true, Seq()))
+    }
+
+    "skip Input.Empty when taking elements" in {
+      val enum = Enumerator(1, 2) >>> Enumerator.enumInput(Input.Empty) >>> Enumerator(3, 4)
+      await(enum |>>> process(3)) must equalTo((Seq(1, 2, 3), false, Seq(4)))
+    }
+
+  }
+
   "Iteratee.ignore" should {
 
     "never throw an OutOfMemoryError when consuming large input" in {
@@ -316,7 +662,7 @@ object IterateesSpec extends Specification
       val tooManyArrays = (Runtime.getRuntime.maxMemory / arraySize).toInt + 1
       val iterator = Iterator.range(0, tooManyArrays).map(_ => new Array[Byte](arraySize))
       import play.api.libs.iteratee.Execution.Implicits.defaultExecutionContext
-      await(Enumerator.enumerate(iterator) |>>> Iteratee.ignore[Array[Byte]]) must_== ()
+      await(Enumerator.enumerate(iterator) |>>> Iteratee.ignore[Array[Byte]]) must_== (())
     }
 
   }

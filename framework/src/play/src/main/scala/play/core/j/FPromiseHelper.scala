@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.core.j
 
@@ -22,7 +22,7 @@ import play.core.Execution.internalContext
  */
 private[play] object FPromiseHelper {
 
-  private val timer = new Timer()
+  private val timer = new Timer(true)
 
   def pure[A](a: A): F.Promise[A] = F.Promise.wrap(Future.successful(a))
 
@@ -50,11 +50,16 @@ private[play] object FPromiseHelper {
   def delayed[A](function: F.Function0[A], duration: Long, unit: TimeUnit, ec: ExecutionContext): F.Promise[A] =
     delayedWith(function.apply(), duration, unit, ec)
 
-  def get[A](promise: F.Promise[A], timeout: Long, unit: TimeUnit): A =
-    Await.result(promise.wrapped(), Duration(timeout, unit))
+  def get[A](promise: F.Promise[A], timeout: Long, unit: TimeUnit): A = {
+    try {
+      Await.result(promise.wrapped(), Duration(timeout, unit))
+    } catch {
+      case ex: TimeoutException => throw new F.PromiseTimeoutException(ex.getMessage, ex)
+    }
+  }
 
   def or[A, B](left: F.Promise[A], right: F.Promise[B]): F.Promise[F.Either[A, B]] = {
-    implicit val ec = Execution.overflowingExecutionContext
+    import Execution.Implicits.trampoline
     val p = Promise[F.Either[A, B]]
     left.wrapped.onComplete {
       case tryA => p.tryComplete(tryA.map(F.Either.Left[A, B](_)))
@@ -66,13 +71,13 @@ private[play] object FPromiseHelper {
   }
 
   def zip[A, B](pa: F.Promise[A], pb: F.Promise[B]): F.Promise[F.Tuple[A, B]] = {
-    implicit val ec = Execution.overflowingExecutionContext
+    import Execution.Implicits.trampoline
     val future = pa.wrapped.zip(pb.wrapped).map { case (a, b) => new F.Tuple(a, b) }
     F.Promise.wrap(future)
   }
 
-  def sequence[A](promises: JIterable[F.Promise[_ <: A]], ec: ExecutionContext): F.Promise[JList[A]] = {
-    val futures = JavaConverters.iterableAsScalaIterableConverter(promises).asScala.toBuffer.map((_: F.Promise[_ <: A]).wrapped)
+  def sequence[A](promises: JIterable[F.Promise[A]], ec: ExecutionContext): F.Promise[JList[A]] = {
+    val futures = JavaConverters.iterableAsScalaIterableConverter(promises).asScala.toBuffer.map((_: F.Promise[A]).wrapped)
     implicit val pec = ec.prepare() // Easiest to provide implicitly so don't need to provide other implicit arg to sequence method
     F.Promise.wrap(Future.sequence(futures).map(az => JavaConverters.bufferAsJavaListConverter(az).asJava))
   }
@@ -89,7 +94,7 @@ private[play] object FPromiseHelper {
     timeoutWith(Success(message), delay, unit)
 
   def timeout[A](delay: Long, unit: TimeUnit): F.Promise[A] =
-    timeoutWith(Failure(new TimeoutException("Timeout in promise")), delay, unit)
+    timeoutWith(Failure(new F.PromiseTimeoutException("Timeout in promise")), delay, unit)
 
   def onRedeem[A](promise: F.Promise[A], action: F.Callback[A], ec: ExecutionContext): Unit =
     promise.wrapped().onSuccess { case a => action.invoke(a) }(ec.prepare())
@@ -100,12 +105,24 @@ private[play] object FPromiseHelper {
   def flatMap[A, B, T >: A](promise: F.Promise[A], function: F.Function[T, F.Promise[B]], ec: ExecutionContext): F.Promise[B] =
     F.Promise.wrap[B](promise.wrapped().flatMap((a: A) => function.apply(a).wrapped())(ec.prepare()))
 
+  def filter[A, T >: A](promise: F.Promise[A], predicate: F.Predicate[T], ec: ExecutionContext): F.Promise[A] =
+    F.Promise.wrap[A](promise.wrapped().filter(predicate.test)(ec.prepare()))
+
   def recover[A](promise: F.Promise[A], function: F.Function[Throwable, A], ec: ExecutionContext): F.Promise[A] =
     F.Promise.wrap[A](promise.wrapped().recover { case t => function.apply(t) }(ec.prepare()))
+
+  def recoverWith[A](promise: F.Promise[A], function: F.Function[Throwable, F.Promise[A]], ec: ExecutionContext): F.Promise[A] =
+    F.Promise.wrap[A](promise.wrapped().recoverWith { case t => function.apply(t).wrapped() }(ec.prepare()))
+
+  def fallbackTo[A](promise: F.Promise[A], fallback: F.Promise[A]): F.Promise[A] =
+    F.Promise.wrap[A](promise.wrapped.fallbackTo(fallback.wrapped))
 
   def onFailure[A](promise: F.Promise[A], action: F.Callback[Throwable], ec: ExecutionContext) {
     promise.wrapped().onFailure { case t => action.invoke(t) }(ec.prepare())
   }
+
+  def transform[A, B, T >: A](promise: F.Promise[A], s: F.Function[T, B], f: F.Function[Throwable, Throwable], ec: ExecutionContext): F.Promise[B] =
+    F.Promise.wrap[B](promise.wrapped.transform(s.apply, f.apply)(ec.prepare()))
 
   def empty[A]() = {
     Promise[A]()

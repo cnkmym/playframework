@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.api.libs.json
 
@@ -19,10 +19,6 @@ trait PathFormat {
   def at[A](path: JsPath)(implicit f: Format[A]): OFormat[A] =
     OFormat[A](Reads.at(path)(f), Writes.at(path)(f))
 
-  @deprecated("use nullable[T] instead", since = "2.1-RC2")
-  def optional[A](path: JsPath)(implicit f: Format[A]): OFormat[Option[A]] =
-    OFormat(Reads.optional(path)(f), Writes.optional(path)(f))
-
   def nullable[A](path: JsPath)(implicit f: Format[A]): OFormat[Option[A]] =
     OFormat(Reads.nullable(path)(f), Writes.nullable(path)(f))
 
@@ -34,15 +30,6 @@ trait PathReads {
 
   def at[A](path: JsPath)(implicit reads: Reads[A]): Reads[A] =
     Reads[A](js => path.asSingleJsResult(js).flatMap(reads.reads(_).repath(path)))
-
-  /**
-   * Reads optional field at JsPath.
-   * If JsPath is not found => None
-   * If JsPath is found => applies implicit Reads[T]
-   */
-  @deprecated("use nullable[T] instead", since = "2.1-RC2")
-  def optional[A](path: JsPath)(implicit reads: Reads[A]): Reads[Option[A]] =
-    Reads[Option[A]](json => path.asSingleJsResult(json).fold(_ => JsSuccess(None), a => reads.reads(a).repath(path).map(Some(_))))
 
   /**
    * Reads a Option[T] search optional or nullable field at JsPath (field not found or null is None
@@ -150,7 +137,7 @@ trait ConstraintReads {
     })
 
   def email(implicit reads: Reads[String]): Reads[String] =
-    pattern("""\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,4}\b""".r, "error.email")
+    pattern("""^[a-zA-Z0-9\.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$""".r, "error.email")
 
   def verifying[A](cond: A => Boolean)(implicit rds: Reads[A]) =
     filter[A](ValidationError("error.invalid"))(cond)(rds)
@@ -172,15 +159,6 @@ trait ConstraintReads {
 trait PathWrites {
   def at[A](path: JsPath)(implicit wrs: Writes[A]): OWrites[A] =
     OWrites[A] { a => JsPath.createObj(path -> wrs.writes(a)) }
-
-  @deprecated("use nullable[T] instead (in parallel with Reads.nullable(path))", since = "2.1-RC2") /** writes a optional field in given JsPath : if None, doesn't write field at all. */
-  def optional[A](path: JsPath)(implicit wrs: Writes[A]): OWrites[Option[A]] =
-    OWrites[Option[A]] { a =>
-      a match {
-        case Some(a) => JsPath.createObj(path -> wrs.writes(a))
-        case None => Json.obj()
-      }
-    }
 
   /**
    * writes a optional field in given JsPath : if None, doesn't write field at all.
@@ -226,7 +204,7 @@ trait ConstraintWrites {
     Writes[JsValue] { js => wrs.writes(fixed) }
 
   def pruned[A](implicit w: Writes[A]): Writes[A] = new Writes[A] {
-    def writes(a: A): JsValue = JsUndefined("pruned")
+    def writes(a: A): JsValue = JsNull
   }
 
   def list[A](implicit writes: Writes[A]): Writes[List[A]] = Writes.traversableWrites[A]

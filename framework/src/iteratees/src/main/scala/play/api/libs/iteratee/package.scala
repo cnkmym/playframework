@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.api.libs {
 
@@ -35,7 +35,7 @@ package play.api.libs.iteratee {
     def executeFuture[A](body: => Future[A])(implicit ec: ExecutionContext): Future[A] = {
       Future {
         body
-      }(ec /* Future.apply will prepare */ ).flatMap(identityFunc.asInstanceOf[Future[A] => Future[A]])(Execution.overflowingExecutionContext)
+      }(ec /* Future.apply will prepare */ ).flatMap(identityFunc.asInstanceOf[Future[A] => Future[A]])(Execution.trampoline)
     }
 
     /**

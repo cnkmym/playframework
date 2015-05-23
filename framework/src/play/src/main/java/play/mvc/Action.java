@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.mvc;
 
@@ -24,7 +24,7 @@ public abstract class Action<T> extends Results {
     /**
      * Executes this action with the given HTTP context and returns the result.
      */
-    public abstract Promise<SimpleResult> call(Context ctx) throws Throwable;
+    public abstract Promise<Result> call(Context ctx) throws Throwable;
     
     /**
      * A simple action with no configuration.

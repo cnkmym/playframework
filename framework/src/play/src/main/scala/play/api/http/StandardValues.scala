@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.api.http
 
@@ -68,6 +68,24 @@ trait ContentTypes {
    */
   def withCharset(mimeType: String)(implicit codec: Codec) = mimeType + "; charset=" + codec.charset
 
+}
+
+/**
+ * Standard HTTP Verbs
+ */
+object HttpVerbs extends HttpVerbs
+
+/**
+ * Standard HTTP Verbs
+ */
+trait HttpVerbs {
+  val GET = "GET"
+  val POST = "POST"
+  val PUT = "PUT"
+  val PATCH = "PATCH"
+  val DELETE = "DELETE"
+  val HEAD = "HEAD"
+  val OPTIONS = "OPTIONS"
 }
 
 /** Common HTTP MIME types */
@@ -179,7 +197,9 @@ trait Status {
   val UNPROCESSABLE_ENTITY = 422
   val LOCKED = 423
   val FAILED_DEPENDENCY = 424
-  val TOO_MANY_REQUEST = 429
+  val TOO_MANY_REQUESTS = 429
+  @deprecated("Use TOO_MANY_REQUESTS instead", "3.0.0")
+  val TOO_MANY_REQUEST = TOO_MANY_REQUESTS
 
   val INTERNAL_SERVER_ERROR = 500
   val NOT_IMPLEMENTED = 501
@@ -265,10 +285,13 @@ trait HeaderNames {
   val WARNING = "Warning"
   val WWW_AUTHENTICATE = "WWW-Authenticate"
 
+  val FORWARDED = "Forwarded"
   val X_FORWARDED_FOR = "X-Forwarded-For"
   val X_FORWARDED_HOST = "X-Forwarded-Host"
   val X_FORWARDED_PORT = "X-Forwarded-Port"
   val X_FORWARDED_PROTO = "X-Forwarded-Proto"
+
+  val X_REQUESTED_WITH = "X-Requested-With"
 
   val ACCESS_CONTROL_ALLOW_ORIGIN = "Access-Control-Allow-Origin"
   val ACCESS_CONTROL_EXPOSE_HEADERS = "Access-Control-Expose-Headers"

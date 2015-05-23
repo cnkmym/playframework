@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.api.test
 
@@ -12,6 +12,8 @@ import play.api.http._
 import play.api.libs.iteratee._
 import play.api.libs.json.{ Json, JsValue }
 
+import play.twirl.api.Content
+
 import org.openqa.selenium._
 import org.openqa.selenium.firefox._
 import org.openqa.selenium.htmlunit._
@@ -19,20 +21,13 @@ import org.openqa.selenium.htmlunit._
 import scala.concurrent.Await
 import scala.concurrent.duration._
 
-import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.Future
 import akka.util.Timeout
 
 /**
  * Helper functions to run tests.
  */
-trait PlayRunners {
-
-  val GET = "GET"
-  val POST = "POST"
-  val PUT = "PUT"
-  val DELETE = "DELETE"
-  val HEAD = "HEAD"
+trait PlayRunners extends HttpVerbs {
 
   val HTMLUNIT = classOf[HtmlUnitDriver]
   val FIREFOX = classOf[FirefoxDriver]
@@ -41,12 +36,12 @@ trait PlayRunners {
    * Executes a block of code in a running application.
    */
   def running[T](app: Application)(block: => T): T = {
-    synchronized {
+    PlayRunners.mutex.synchronized {
       try {
         Play.start(app)
         block
       } finally {
-        Play.stop()
+        Play.stop(app)
       }
     }
   }
@@ -55,7 +50,7 @@ trait PlayRunners {
    * Executes a block of code in a running server.
    */
   def running[T](testServer: TestServer)(block: => T): T = {
-    synchronized {
+    PlayRunners.mutex.synchronized {
       try {
         testServer.start()
         block
@@ -77,7 +72,7 @@ trait PlayRunners {
    */
   def running[T](testServer: TestServer, webDriver: WebDriver)(block: TestBrowser => T): T = {
     var browser: TestBrowser = null
-    synchronized {
+    PlayRunners.mutex.synchronized {
       try {
         testServer.start()
         browser = TestBrowser(webDriver, None)
@@ -111,7 +106,15 @@ trait PlayRunners {
 
 }
 
+object PlayRunners {
+  /**
+   * This mutex is used to ensure that no two tests that set the global application can run at the same time.
+   */
+  private[play] val mutex: AnyRef = new AnyRef()
+}
+
 trait Writeables {
+  import play.api.libs.iteratee.Execution.Implicits.trampoline
   implicit def writeableOf_AnyContentAsJson(implicit codec: Codec): Writeable[AnyContentAsJson] =
     Writeable.writeableOf_JsValue.map(c => c.json)
 
@@ -136,7 +139,7 @@ trait DefaultAwaitTimeout {
   /**
    * The default await timeout.  Override this to change it.
    */
-  implicit def defaultAwaitTimeout: Timeout = 5.seconds
+  implicit def defaultAwaitTimeout: Timeout = 20.seconds
 
   /**
    * How long we should wait for something that we expect *not* to happen, e.g.
@@ -171,7 +174,7 @@ trait FutureAwaits {
   /**
    * Block until a Promise is redeemed with the specified timeout.
    */
-  def await[T](future: Future[T], timeout: Long, unit: TimeUnit = TimeUnit.MILLISECONDS): T =
+  def await[T](future: Future[T], timeout: Long, unit: TimeUnit): T =
     Await.result(future, Duration(timeout, unit))
 
 }
@@ -184,7 +187,7 @@ trait EssentialActionCaller {
    *
    * The body is serialised using the implicit writable, so that the action body parser can deserialise it.
    */
-  def call[T](action: EssentialAction, req: FakeRequest[T])(implicit w: Writeable[T]): Future[SimpleResult] =
+  def call[T](action: EssentialAction, req: Request[T])(implicit w: Writeable[T]): Future[Result] =
     call(action, req, req.body)
 
   /**
@@ -192,10 +195,12 @@ trait EssentialActionCaller {
    *
    * The body is serialised using the implicit writable, so that the action body parser can deserialise it.
    */
-  def call[T](action: EssentialAction, rh: RequestHeader, body: T)(implicit w: Writeable[T]): Future[SimpleResult] = {
-    val rhWithCt = w.contentType.map(ct => rh.copy(
-      headers = FakeHeaders((rh.headers.toMap + ("Content-Type" -> Seq(ct))).toSeq)
-    )).getOrElse(rh)
+  def call[T](action: EssentialAction, rh: RequestHeader, body: T)(implicit w: Writeable[T]): Future[Result] = {
+    import play.api.http.HeaderNames._
+    val newContentType = rh.headers.get(CONTENT_TYPE).fold(w.contentType)(_ => None)
+    val rhWithCt = newContentType.map { ct =>
+      rh.copy(headers = rh.headers.replace(CONTENT_TYPE -> ct))
+    }.getOrElse(rh)
 
     val requestBody = Enumerator(body) &> w.toEnumeratee
     requestBody |>>> action(rhWithCt)
@@ -205,45 +210,9 @@ trait EssentialActionCaller {
 trait RouteInvokers extends EssentialActionCaller {
   self: Writeables =>
 
-  /**
-   * Use the Router to determine the Action to call for this request and executes it.
-   */
-  @deprecated("Use `route` instead.", "2.1.0")
-  def routeAndCall[T](request: FakeRequest[T])(implicit timeout: Timeout): Option[Future[SimpleResult]] = {
-    routeAndCall(this.getClass.getClassLoader.loadClass("Routes").asInstanceOf[Class[play.core.Router.Routes]], request)
-  }
-
-  /**
-   * Use the Router to determine the Action to call for this request and executes it.
-   */
-  @deprecated("Use `route` instead.", "2.1.0")
-  def routeAndCall[T, ROUTER <: play.core.Router.Routes](router: Class[ROUTER], request: FakeRequest[T])(implicit timeout: Timeout): Option[Future[SimpleResult]] = {
-    val routes = router.getClassLoader.loadClass(router.getName + "$").getDeclaredField("MODULE$").get(null).asInstanceOf[play.core.Router.Routes]
-    routes.routes.lift(request).map {
-      case a: Action[_] =>
-        val action = a.asInstanceOf[Action[T]]
-        val parsedBody: Option[Either[SimpleResult, T]] = {
-          Await.result(action.parser(request).fold(step => Future.successful(step match {
-            case Step.Done(a, in) => Some(a)
-            case Step.Cont(k) => None: Option[Either[SimpleResult, T]]
-            case Step.Error(msg, in) => None: Option[Either[SimpleResult, T]]
-          }))(global), timeout.duration)
-        }
-        parsedBody.map { resultOrT =>
-          resultOrT.right.toOption.map { innerBody =>
-            action(FakeRequest(request.method, request.uri, request.headers, innerBody))
-          }.getOrElse(Future.successful(resultOrT.left.get))
-        }.getOrElse(action(request))
-
-    }
-  }
-
   // Java compatibility
-  def jRoute(app: Application, rh: RequestHeader): Option[Future[SimpleResult]] = route(app, rh, AnyContentAsEmpty)
-  def jRoute(app: Application, rh: RequestHeader, body: Array[Byte]): Option[Future[SimpleResult]] = route(app, rh, body)(Writeable.wBytes)
-  def jRoute(rh: RequestHeader, body: Array[Byte]): Option[Future[SimpleResult]] = jRoute(Play.current, rh, body)
-  def jRoute[T](app: Application, r: FakeRequest[T]): Option[Future[SimpleResult]] = {
-    (r.body: @unchecked) match {
+  def jRoute[T](app: Application, r: RequestHeader, body: T): Option[Future[Result]] = {
+    (body: @unchecked) match {
       case body: AnyContentAsFormUrlEncoded => route(app, r, body)
       case body: AnyContentAsJson => route(app, r, body)
       case body: AnyContentAsXml => route(app, r, body)
@@ -255,45 +224,39 @@ trait RouteInvokers extends EssentialActionCaller {
   }
 
   /**
-   * Use the Router to determine the Action to call for this request and execute it.
+   * Use the HttpRequestHandler to determine the Action to call for this request and execute it.
    *
    * The body is serialised using the implicit writable, so that the action body parser can deserialise it.
    */
-  def route[T](app: Application, rh: RequestHeader, body: T)(implicit w: Writeable[T]): Option[Future[SimpleResult]] = {
-    val handler = app.global.onRouteRequest(rh)
-    val taggedRh = handler.map({
-      case h: RequestTaggingHandler => h.tagRequest(rh)
-      case _ => rh
-    }).getOrElse(rh)
-    handler.flatMap {
+  def route[T](app: Application, rh: RequestHeader, body: T)(implicit w: Writeable[T]): Option[Future[Result]] = {
+    val (taggedRh, handler) = app.requestHandler.handlerForRequest(rh)
+    handler match {
       case a: EssentialAction =>
-        val filteredAction = app.global.doFilter(a)
-        Some(call(filteredAction, taggedRh, body))
-
+        Some(call(a, taggedRh, body))
       case _ => None
     }
   }
 
   /**
-   * Use the Router to determine the Action to call for this request and execute it.
+   * Use the HttpRequestHandler to determine the Action to call for this request and execute it.
    *
    * The body is serialised using the implicit writable, so that the action body parser can deserialise it.
    */
-  def route[T](rh: RequestHeader, body: T)(implicit w: Writeable[T]): Option[Future[SimpleResult]] = route(Play.current, rh, body)
+  def route[T](rh: RequestHeader, body: T)(implicit w: Writeable[T]): Option[Future[Result]] = route(Play.current, rh, body)
 
   /**
-   * Use the Router to determine the Action to call for this request and execute it.
+   * Use the HttpRequestHandler to determine the Action to call for this request and execute it.
    *
    * The body is serialised using the implicit writable, so that the action body parser can deserialise it.
    */
-  def route[T](app: Application, req: Request[T])(implicit w: Writeable[T]): Option[Future[SimpleResult]] = route(app, req, req.body)
+  def route[T](app: Application, req: Request[T])(implicit w: Writeable[T]): Option[Future[Result]] = route(app, req, req.body)
 
   /**
-   * Use the Router to determine the Action to call for this request and execute it.
+   * Use the HttpRequestHandler to determine the Action to call for this request and execute it.
    *
    * The body is serialised using the implicit writable, so that the action body parser can deserialise it.
    */
-  def route[T](req: Request[T])(implicit w: Writeable[T]): Option[Future[SimpleResult]] = route(Play.current, req)
+  def route[T](req: Request[T])(implicit w: Writeable[T]): Option[Future[Result]] = route(Play.current, req)
 }
 
 trait ResultExtractors {
@@ -322,12 +285,12 @@ trait ResultExtractors {
   /**
    * Extracts the Content-Type of this Result value.
    */
-  def contentType(of: Future[SimpleResult])(implicit timeout: Timeout): Option[String] = header(CONTENT_TYPE, of).map(_.split(";").take(1).mkString.trim)
+  def contentType(of: Future[Result])(implicit timeout: Timeout): Option[String] = header(CONTENT_TYPE, of).map(_.split(";").take(1).mkString.trim)
 
   /**
    * Extracts the Charset of this Result value.
    */
-  def charset(of: Future[SimpleResult])(implicit timeout: Timeout): Option[String] = header(CONTENT_TYPE, of) match {
+  def charset(of: Future[Result])(implicit timeout: Timeout): Option[String] = header(CONTENT_TYPE, of) match {
     case Some(s) if s.contains("charset=") => Some(s.split("; charset=").drop(1).mkString.trim)
     case _ => None
   }
@@ -335,60 +298,66 @@ trait ResultExtractors {
   /**
    * Extracts the content as String.
    */
-  def contentAsString(of: Future[SimpleResult])(implicit timeout: Timeout): String = new String(contentAsBytes(of), charset(of).getOrElse("utf-8"))
+  def contentAsString(of: Future[Result])(implicit timeout: Timeout): String = new String(contentAsBytes(of), charset(of).getOrElse("utf-8"))
 
   /**
    * Extracts the content as bytes.
    */
-  def contentAsBytes(of: Future[SimpleResult])(implicit timeout: Timeout): Array[Byte] =
-    Await.result(Await.result(of, timeout.duration).body |>>> Iteratee.consume[Array[Byte]](), timeout.duration)
+  def contentAsBytes(of: Future[Result])(implicit timeout: Timeout): Array[Byte] = {
+    val result = Await.result(of, timeout.duration)
+    val eBytes = result.header.headers.get(TRANSFER_ENCODING) match {
+      case Some("chunked") => result.body &> Results.dechunk
+      case _ => result.body
+    }
+    Await.result(eBytes |>>> Iteratee.consume[Array[Byte]](), timeout.duration)
+  }
 
   /**
    * Extracts the content as Json.
    */
-  def contentAsJson(of: Future[SimpleResult])(implicit timeout: Timeout): JsValue = Json.parse(contentAsString(of))
+  def contentAsJson(of: Future[Result])(implicit timeout: Timeout): JsValue = Json.parse(contentAsString(of))
 
   /**
    * Extracts the Status code of this Result value.
    */
-  def status(of: Future[SimpleResult])(implicit timeout: Timeout): Int = Await.result(of, timeout.duration).header.status
+  def status(of: Future[Result])(implicit timeout: Timeout): Int = Await.result(of, timeout.duration).header.status
 
   /**
    * Extracts the Cookies of this Result value.
    */
-  def cookies(of: Future[SimpleResult])(implicit timeout: Timeout): Cookies = Cookies(header(SET_COOKIE, of))
+  def cookies(of: Future[Result])(implicit timeout: Timeout): Cookies = Cookies.fromSetCookieHeader(header(SET_COOKIE, of))
 
   /**
    * Extracts the Flash values of this Result value.
    */
-  def flash(of: Future[SimpleResult])(implicit timeout: Timeout): Flash = Flash.decodeFromCookie(cookies(of).get(Flash.COOKIE_NAME))
+  def flash(of: Future[Result])(implicit timeout: Timeout): Flash = Flash.decodeFromCookie(cookies(of).get(Flash.COOKIE_NAME))
 
   /**
    * Extracts the Session of this Result value.
    * Extracts the Session from this Result value.
    */
-  def session(of: Future[SimpleResult])(implicit timeout: Timeout): Session = Session.decodeFromCookie(cookies(of).get(Session.COOKIE_NAME))
+  def session(of: Future[Result])(implicit timeout: Timeout): Session = Session.decodeFromCookie(cookies(of).get(Session.COOKIE_NAME))
 
   /**
    * Extracts the Location header of this Result value if this Result is a Redirect.
    */
-  def redirectLocation(of: Future[SimpleResult])(implicit timeout: Timeout): Option[String] = Await.result(of, timeout.duration).header match {
-    case ResponseHeader(FOUND, headers) => headers.get(LOCATION)
-    case ResponseHeader(SEE_OTHER, headers) => headers.get(LOCATION)
-    case ResponseHeader(TEMPORARY_REDIRECT, headers) => headers.get(LOCATION)
-    case ResponseHeader(MOVED_PERMANENTLY, headers) => headers.get(LOCATION)
-    case ResponseHeader(_, _) => None
+  def redirectLocation(of: Future[Result])(implicit timeout: Timeout): Option[String] = Await.result(of, timeout.duration).header match {
+    case ResponseHeader(FOUND, headers, _) => headers.get(LOCATION)
+    case ResponseHeader(SEE_OTHER, headers, _) => headers.get(LOCATION)
+    case ResponseHeader(TEMPORARY_REDIRECT, headers, _) => headers.get(LOCATION)
+    case ResponseHeader(MOVED_PERMANENTLY, headers, _) => headers.get(LOCATION)
+    case ResponseHeader(_, _, _) => None
   }
 
   /**
    * Extracts an Header value of this Result value.
    */
-  def header(header: String, of: Future[SimpleResult])(implicit timeout: Timeout): Option[String] = headers(of).get(header)
+  def header(header: String, of: Future[Result])(implicit timeout: Timeout): Option[String] = headers(of).get(header)
 
   /**
    * Extracts all Headers of this Result value.
    */
-  def headers(of: Future[SimpleResult])(implicit timeout: Timeout): Map[String, String] = Await.result(of, timeout.duration).header.headers
+  def headers(of: Future[Result])(implicit timeout: Timeout): Map[String, String] = Await.result(of, timeout.duration).header.headers
 }
 
 object Helpers extends PlayRunners

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.api.libs.iteratee
 
@@ -11,7 +11,7 @@ import concurrent.duration.Duration
 import concurrent.Await
 
 object ParsingSpec extends Specification
-  with IterateeSpecification with ExecutionSpecification {
+    with IterateeSpecification with ExecutionSpecification {
 
   "Parsing" should {
 

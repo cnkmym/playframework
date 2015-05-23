@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.api.libs.iteratee
 
@@ -9,7 +9,7 @@ import org.specs2.mutable.SpecificationLike
 /**
  * Common functionality for iteratee tests.
  */
-trait ExecutionSpecification {
+trait ExecutionSpecification extends NoConcurrentExecutionContext {
   self: SpecificationLike =>
 
   def testExecution[A](f: TestExecutionContext => A): A = {

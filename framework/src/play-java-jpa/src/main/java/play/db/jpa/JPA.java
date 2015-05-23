@@ -1,12 +1,11 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.db.jpa;
 
 import play.*;
 import play.libs.F;
 import play.mvc.Http;
-import scala.concurrent.ExecutionContext;
 
 import javax.persistence.*;
 
@@ -18,27 +17,46 @@ public class JPA {
     // Only used when there's no HTTP context
     static ThreadLocal<EntityManager> currentEntityManager = new ThreadLocal<EntityManager>();
 
+    private static final String CURRENT_ENTITY_MANAGER = "currentEntityManager";
+
+    /**
+     * Create a default JPAApi with the given persistence unit configuration.
+     * Automatically initialise the JPA entity manager factories.
+     */
+    public static JPAApi createFor(String name, String unitName) {
+        return new DefaultJPAApi(DefaultJPAConfig.of(name, unitName)).start();
+    }
+
+    /**
+     * Create a default JPAApi with name "default" and the given unit name.
+     * Automatically initialise the JPA entity manager factories.
+     */
+    public static JPAApi createFor(String unitName) {
+        return new DefaultJPAApi(DefaultJPAConfig.of("default", unitName)).start();
+    }
+
+    /**
+     * Get the JPA api for the current play application.
+     */
+    public static JPAApi jpaApi() {
+        Application app = Play.application();
+        if (app == null) {
+            throw new RuntimeException("No application running");
+        }
+        return app.injector().instanceOf(JPAApi.class);
+    }
+
     /**
      * Get the EntityManager for specified persistence unit for this thread.
      */
     public static EntityManager em(String key) {
-        Application app = Play.application();
-        if(app == null) {
-            throw new RuntimeException("No application running");
-        }
-
-        JPAPlugin jpaPlugin = app.plugin(JPAPlugin.class);
-        if(jpaPlugin == null) {
-            throw new RuntimeException("No JPA EntityManagerFactory configured for name [" + key + "]");
-        }
-
-        EntityManager em = jpaPlugin.em(key);
-        if(em == null) {
+        EntityManager em = jpaApi().em(key);
+        if (em == null) {
             throw new RuntimeException("No JPA EntityManagerFactory configured for name [" + key + "]");
         }
 
         return em;
-    } 
+    }
 
     /**
      * Get the default EntityManager for this thread.
@@ -46,9 +64,9 @@ public class JPA {
     public static EntityManager em() {
         Http.Context context = Http.Context.current.get();
         if (context != null) {
-            EntityManager em = (EntityManager) context.args.get("currentEntityManager");
+            EntityManager em = (EntityManager) context.args.get(CURRENT_ENTITY_MANAGER);
             if (em == null) {
-                throw new RuntimeException("No EntityManager bound to this thread. Try to annotate your action method with @play.db.jpa.Transactional");
+                throw new RuntimeException("No EntityManager found in the context. Try to annotate your action method with @play.db.jpa.Transactional");
             }
             return em;
         }
@@ -61,18 +79,42 @@ public class JPA {
     }
 
     /**
-     * Bind an EntityManager to the current thread.
+     * Bind an EntityManager to the current HTTP context.
+     * If no HTTP context is available the EntityManager gets bound to the current thread instead.
      */
-    public static void bindForCurrentThread(EntityManager em) {
+    public static void bindForSync(EntityManager em) {
+        bindForCurrentContext(em, true);
+    }
+
+    /**
+     * Bind an EntityManager to the current HTTP context.
+     *
+     * @throws RuntimeException if no HTTP context is present.
+     */
+    public static void bindForAsync(EntityManager em) {
+        bindForCurrentContext(em, false);
+    }
+
+    /**
+     * Bind an EntityManager to the current HTTP context.
+     *
+     * @throws RuntimeException if no HTTP context is present and {@code threadLocalFallback} is false.
+     */
+    private static void bindForCurrentContext(EntityManager em, boolean threadLocalFallback) {
         Http.Context context = Http.Context.current.get();
         if (context != null) {
             if (em == null) {
-                context.args.remove("currentEntityManager");
+                context.args.remove(CURRENT_ENTITY_MANAGER);
             } else {
-                context.args.put("currentEntityManager", em);
+                context.args.put(CURRENT_ENTITY_MANAGER, em);
             }
         } else {
-            currentEntityManager.set(em);
+            // Not a web request
+            if(threadLocalFallback) {
+                currentEntityManager.set(em);
+            } else {
+                throw new RuntimeException("No Http.Context is present. If you want to invoke this method outside of a HTTP request, you need to wrap the call with JPA.withTransaction instead.");
+            }
         }
     }
 
@@ -82,16 +124,19 @@ public class JPA {
      * @param block Block of code to execute.
      */
     public static <T> T withTransaction(play.libs.F.Function0<T> block) throws Throwable {
-        return withTransaction("default", false, block);
+        return jpaApi().withTransaction(block);
     }
 
     /**
      * Run a block of asynchronous code in a JPA transaction.
      *
      * @param block Block of code to execute.
+     *
+     * @deprecated This may cause deadlocks
      */
+    @Deprecated
     public static <T> F.Promise<T> withTransactionAsync(play.libs.F.Function0<F.Promise<T>> block) throws Throwable {
-        return withTransactionAsync("default", false, block);
+        return jpaApi().withTransactionAsync(block);
     }
 
     /**
@@ -100,16 +145,7 @@ public class JPA {
      * @param block Block of code to execute.
      */
     public static void withTransaction(final play.libs.F.Callback0 block) {
-        try {
-            withTransaction("default", false, new play.libs.F.Function0<Void>() {
-                public Void apply() throws Throwable {
-                    block.invoke();
-                    return null;
-                }
-            });
-        } catch(Throwable t) {
-            throw new RuntimeException(t);
-        }
+        jpaApi().withTransaction(block);
     }
 
     /**
@@ -120,41 +156,7 @@ public class JPA {
      * @param block Block of code to execute.
      */
     public static <T> T withTransaction(String name, boolean readOnly, play.libs.F.Function0<T> block) throws Throwable {
-        EntityManager em = null;
-        EntityTransaction tx = null;
-        try {
-
-            em = JPA.em(name);
-            JPA.bindForCurrentThread(em);
-
-            if(!readOnly) {
-                tx = em.getTransaction();
-                tx.begin();
-            }
-
-            T result = block.apply();
-
-            if(tx != null) {
-                if(tx.getRollbackOnly()) {
-                    tx.rollback();
-                } else {
-                    tx.commit();
-                }
-            }
-
-            return result;
-
-        } catch(Throwable t) {
-            if(tx != null) {
-                try { tx.rollback(); } catch(Throwable e) {}
-            }
-            throw t;
-        } finally {
-            JPA.bindForCurrentThread(null);
-            if(em != null) {
-                em.close();
-            }
-        }
+        return jpaApi().withTransaction(name, readOnly, block);
     }
 
     /**
@@ -163,65 +165,11 @@ public class JPA {
      * @param name The persistence unit name
      * @param readOnly Is the transaction read-only?
      * @param block Block of code to execute.
+     *
+     * @deprecated This may cause deadlocks
      */
+    @Deprecated
     public static <T> F.Promise<T> withTransactionAsync(String name, boolean readOnly, play.libs.F.Function0<F.Promise<T>> block) throws Throwable {
-        EntityManager em = null;
-        EntityTransaction tx = null;
-        try {
-
-            em = JPA.em(name);
-            JPA.bindForCurrentThread(em);
-
-            if(!readOnly) {
-                tx = em.getTransaction();
-                tx.begin();
-            }
-
-            F.Promise<T> result = block.apply();
-
-            final EntityManager fem = em;
-            final EntityTransaction ftx = tx;
-
-            F.Promise<T> committedResult = result.map(new F.Function<T, T>() {
-                @Override
-                public T apply(T t) throws Throwable {
-                    try {
-                        if(ftx != null) {
-                            if(ftx.getRollbackOnly()) {
-                                ftx.rollback();
-                            } else {
-                                ftx.commit();
-                            }
-                        }
-                    } finally {
-                        fem.close();
-                    }
-                    return t;
-                }
-            });
-
-            committedResult.onFailure(new F.Callback<Throwable>() {
-                @Override
-                public void invoke(Throwable t) {
-                    if (ftx != null) {
-                        try { if (ftx.isActive()) ftx.rollback(); } catch(Throwable e) {}
-                    }
-                    fem.close();
-                }
-            });
-
-            return committedResult;
-
-        } catch(Throwable t) {
-            if(tx != null) {
-                try { tx.rollback(); } catch(Throwable e) {}
-            }
-            if(em != null) {
-                em.close();
-            }
-            throw t;
-        } finally {
-            JPA.bindForCurrentThread(null);
-        }
+        return jpaApi().withTransactionAsync(name, readOnly, block);
     }
 }

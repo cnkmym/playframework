@@ -1,12 +1,15 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.api
 
+import play.api.i18n.MessagesApi
 import play.utils.Threads
 
 import java.io._
 
+import scala.concurrent.Await
+import scala.concurrent.duration.Duration
 import scala.util.control.NonFatal
 import javax.xml.parsers.SAXParserFactory
 import org.apache.xerces.impl.Constants
@@ -29,10 +32,7 @@ object Mode extends Enumeration {
  */
 object Play {
 
-  /*
-   * A general purpose logger for Play. Intended for internal usage.
-   */
-  private[play] val logger = Logger("play")
+  private val logger = Logger(Play.getClass)
 
   /*
    * We want control over the sax parser used so we specify the factory required explicitly. We know that
@@ -70,17 +70,17 @@ object Play {
    */
   implicit def current: Application = maybeApplication.getOrElse(sys.error("There is no started application"))
 
-  private[play] var _currentApp: Application = _
+  @volatile private[play] var _currentApp: Application = _
 
   /**
    * Starts this application.
    *
-   * @param the application to start
+   * @param app the application to start
    */
   def start(app: Application) {
 
     // First stop previous app if exists
-    stop()
+    stop(_currentApp)
 
     _currentApp = app
 
@@ -99,14 +99,15 @@ object Play {
   }
 
   /**
-   * Stops the current application.
+   * Stops the given application.
    */
-  def stop() {
-    Option(_currentApp).map { app =>
+  def stop(app: Application) {
+    if (app != null) {
       Threads.withContextClassLoader(classloader(app)) {
         app.plugins.reverse.foreach { p =>
           try { p.onStop() } catch { case NonFatal(e) => logger.warn("Error stopping plugin", e) }
         }
+        try { Await.ready(app.stop(), Duration.Inf) } catch { case NonFatal(e) => logger.warn("Error stopping application", e) }
       }
     }
     _currentApp = null
@@ -190,7 +191,7 @@ object Play {
   /**
    * Returns the current application router.
    */
-  def routes(implicit app: Application): Option[play.core.Router.Routes] = app.routes
+  def routes(implicit app: Application): play.api.routing.Router = app.routes
 
   /**
    * Returns the current application global settings.
@@ -220,5 +221,18 @@ object Play {
   /**
    * Returns the name of the cookie that can be used to permanently set the user's language.
    */
-  def langCookieName(implicit app: Application): String = app.configuration.getString("application.lang.cookie").getOrElse("PLAY_LANG")
+  def langCookieName(implicit messagesApi: MessagesApi): String =
+    messagesApi.langCookieName
+
+  /**
+   * Returns whether the language cookie should have the secure flag set.
+   */
+  def langCookieSecure(implicit messagesApi: MessagesApi): Boolean =
+    messagesApi.langCookieSecure
+
+  /**
+   * Returns whether the language cookie should have the HTTP only flag set.
+   */
+  def langCookieHttpOnly(implicit messagesApi: MessagesApi): Boolean =
+    messagesApi.langCookieHttpOnly
 }

@@ -1,9 +1,10 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package controllers
 
 import org.specs2.mutable.Specification
+import play.api.mvc.ResponseHeader
 import play.utils.InvalidUriEncodingException
 
 object AssetsSpec extends Specification {
@@ -64,16 +65,16 @@ object AssetsSpec extends Specification {
       Assets.resourceNameAt("/x", "foo+bar%3A%20baz.txt") must beSome("/x/foo+bar: baz.txt")
     }
 
-   "look up assets with percent-encoded file separators" in {
+    "look up assets with percent-encoded file separators" in {
       Assets.resourceNameAt("/x", "%2f") must beSome("/x/")
       Assets.resourceNameAt("/x", "a%2fb") must beSome("/x/a/b")
       Assets.resourceNameAt("/x", "a/%2fb") must beSome("/x/a/b")
     }
 
     "fail when looking up assets with invalid chars in the URL" in {
-      Assets.resourceNameAt("a", "|") must throwA[InvalidUriEncodingException]
-      Assets.resourceNameAt("a", "hello world") must throwA[InvalidUriEncodingException]
-      Assets.resourceNameAt("a", "b/[c]/d") must throwA[InvalidUriEncodingException]
+      Assets.resourceNameAt("a", "|") must throwAn[InvalidUriEncodingException]
+      Assets.resourceNameAt("a", "hello world") must throwAn[InvalidUriEncodingException]
+      Assets.resourceNameAt("a", "b/[c]/d") must throwAn[InvalidUriEncodingException]
     }
 
     "look up assets even if the file path is a valid URI" in {
@@ -99,5 +100,12 @@ object AssetsSpec extends Specification {
       Assets.resourceNameAt("/a/b", "../../c/d") must beNone
     }
 
+    "use the unescaped path when finding the last modified date of an asset" in {
+      val url = AssetsSpec.getClass.getClassLoader.getResource("file withspace.css")
+      val assetInfo = new AssetInfo("file withspace.css", url, None, None)
+      val lastModified = ResponseHeader.httpDateFormat.parseDateTime(assetInfo.lastModified.get)
+      // If it uses the escaped path, the file won't be found, and so last modified will be 0
+      lastModified.toDate.getTime must_!= 0
+    }
   }
 }

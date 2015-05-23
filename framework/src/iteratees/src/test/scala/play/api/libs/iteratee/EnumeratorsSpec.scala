@@ -1,18 +1,20 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.api.libs.iteratee
 
+import java.nio.file.Files
+
 import org.specs2.mutable._
 import java.io.{ ByteArrayInputStream, File, FileOutputStream, OutputStream }
-import java.util.concurrent.{CountDownLatch, TimeUnit}
+import java.util.concurrent.{ CountDownLatch, TimeUnit }
 import java.util.concurrent.atomic.AtomicInteger
 import play.api.libs.iteratee.Execution.Implicits.{ defaultExecutionContext => dec }
-import scala.concurrent.{Promise, Future, Await}
+import scala.concurrent.{ Promise, Future, Await }
 import scala.concurrent.duration.Duration
 
 object EnumeratorsSpec extends Specification
-  with IterateeSpecification with ExecutionSpecification {
+    with IterateeSpecification with ExecutionSpecification {
 
   "Enumerator's interleave" should {
 
@@ -131,7 +133,7 @@ object EnumeratorsSpec extends Specification
   }
 
   "Enumerator" should {
-    
+
     "call onDoneEnumerating callback" in {
       mustExecute(1) { onDoneEC =>
         val count = new java.util.concurrent.atomic.AtomicInteger()
@@ -149,19 +151,19 @@ object EnumeratorsSpec extends Specification
         count.get() must_== 1
       }
     }
-    
+
     "transform input elements with map" in {
       mustExecute(3) { mapEC =>
         mustEnumerateTo(2, 4, 6)(Enumerator(1, 2, 3).map(_ * 2)(mapEC))
       }
     }
-    
+
     "transform input with map" in {
       mustExecute(3) { mapEC =>
         mustEnumerateTo(2, 4, 6)(Enumerator(1, 2, 3).mapInput(_.map(_ * 2))(mapEC))
       }
     }
-    
+
     "be transformed to another Enumerator using flatMap" in {
       mustExecute(3, 30) { (flatMapEC, foldEC) =>
         val e = Enumerator(10, 20, 30).flatMap(i => Enumerator((i until i + 10): _*))(flatMapEC)
@@ -207,7 +209,7 @@ object EnumeratorsSpec extends Specification
         () => (),
         (msg, input) =>
           errorCount.incrementAndGet()
-        )
+      )
 
       val result = enum |>>> it
 
@@ -225,7 +227,7 @@ object EnumeratorsSpec extends Specification
         () => (),
         (msg, input) =>
           errorCount.incrementAndGet()
-        )
+      )
 
       val result1 = enum |>>> it1
       val result2 = enum |>>> it2
@@ -241,12 +243,12 @@ object EnumeratorsSpec extends Specification
         val completeDone = new CountDownLatch(1)
         val errorCount = new AtomicInteger(0)
         val enumerator = Enumerator.fromCallback1(
-            b => Future(if (it.hasNext) Some((b, it.next())) else None),
-            () => {
-              completeCount.incrementAndGet()
-              completeDone.countDown()
-            },
-            (_: String, _: Input[(Boolean, Int)]) => errorCount.incrementAndGet())(callbackEC)
+          b => Future(if (it.hasNext) Some((b, it.next())) else None),
+          () => {
+            completeCount.incrementAndGet()
+            completeDone.countDown()
+          },
+          (_: String, _: Input[(Boolean, Int)]) => errorCount.incrementAndGet())(callbackEC)
         mustEnumerateTo((true, 1), (false, 2), (false, 3))(enumerator)
         completeDone.await(30, TimeUnit.SECONDS) must beTrue
         completeCount.get() must equalTo(1)
@@ -302,6 +304,24 @@ object EnumeratorsSpec extends Specification
           mustEnumerateTo(s)(enumerator)
         } finally {
           f.delete()
+        }
+      }
+    }
+  }
+
+  "Enumerator.fromPath" should {
+    "read bytes from a path" in {
+      mustExecute(3) { fromPathEC =>
+        val f = Files.createTempFile("EnumeratorSpec", "fromPath")
+        try {
+          val s = "hello"
+          val out = Files.newOutputStream(f)
+          out.write(s.getBytes)
+          out.close()
+          val enumerator = Enumerator.fromPath(f)(fromPathEC).map(new String(_))
+          mustEnumerateTo(s)(enumerator)
+        } finally {
+          Files.delete(f)
         }
       }
     }

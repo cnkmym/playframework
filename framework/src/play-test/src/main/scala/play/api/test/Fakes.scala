@@ -1,13 +1,20 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.api.test
 
+import javax.inject.{ Inject, Provider }
+
+import akka.actor.ActorSystem
+import play.api._
+import play.api.http._
+import play.api.inject.guice.GuiceApplicationBuilder
+import play.api.inject._
 import play.api.mvc._
 import play.api.libs.json.JsValue
+import play.api.routing.Router
 import scala.concurrent.Future
 import xml.NodeSeq
-import play.core.Router
 import scala.runtime.AbstractPartialFunction
 import play.api.libs.Files.TemporaryFile
 
@@ -16,7 +23,7 @@ import play.api.libs.Files.TemporaryFile
  *
  * @param data Headers data.
  */
-case class FakeHeaders(override val data: Seq[(String, Seq[String])] = Seq.empty) extends Headers
+case class FakeHeaders(data: Seq[(String, String)] = Seq.empty) extends Headers(data)
 
 /**
  * Fake HTTP request implementation.
@@ -28,7 +35,7 @@ case class FakeHeaders(override val data: Seq[(String, Seq[String])] = Seq.empty
  * @param body The request body.
  * @param remoteAddress The client IP.
  */
-case class FakeRequest[A](method: String, uri: String, headers: FakeHeaders, body: A, remoteAddress: String = "127.0.0.1", version: String = "HTTP/1.1", id: Long = 666, tags: Map[String, String] = Map.empty[String, String], secure: Boolean = false) extends Request[A] {
+case class FakeRequest[A](method: String, uri: String, headers: Headers, body: A, remoteAddress: String = "127.0.0.1", version: String = "HTTP/1.1", id: Long = 666, tags: Map[String, String] = Map.empty[String, String], secure: Boolean = false) extends Request[A] {
 
   private def _copy[B](
     id: Long = this.id,
@@ -37,7 +44,7 @@ case class FakeRequest[A](method: String, uri: String, headers: FakeHeaders, bod
     path: String = this.path,
     method: String = this.method,
     version: String = this.version,
-    headers: FakeHeaders = this.headers,
+    headers: Headers = this.headers,
     remoteAddress: String = this.remoteAddress,
     secure: Boolean = this.secure,
     body: B = this.body): FakeRequest[B] = {
@@ -61,12 +68,7 @@ case class FakeRequest[A](method: String, uri: String, headers: FakeHeaders, bod
    * Constructs a new request with additional headers. Any existing headers of the same name will be replaced.
    */
   def withHeaders(newHeaders: (String, String)*): FakeRequest[A] = {
-    _copy(headers = FakeHeaders({
-      val newData = newHeaders.map {
-        case (k, v) => (k, Seq(v))
-      }
-      (Map() ++ (headers.data ++ newData)).toSeq
-    }))
+    _copy(headers = headers.replace(newHeaders: _*))
   }
 
   /**
@@ -74,7 +76,7 @@ case class FakeRequest[A](method: String, uri: String, headers: FakeHeaders, bod
    */
   def withFlash(data: (String, String)*): FakeRequest[A] = {
     withHeaders(play.api.http.HeaderNames.COOKIE ->
-      Cookies.merge(headers.get(play.api.http.HeaderNames.COOKIE).getOrElse(""),
+      Cookies.mergeCookieHeader(headers.get(play.api.http.HeaderNames.COOKIE).getOrElse(""),
         Seq(Flash.encodeAsCookie(new Flash(flash.data ++ data)))
       )
     )
@@ -85,7 +87,7 @@ case class FakeRequest[A](method: String, uri: String, headers: FakeHeaders, bod
    */
   def withCookies(cookies: Cookie*): FakeRequest[A] = {
     withHeaders(play.api.http.HeaderNames.COOKIE ->
-      Cookies.merge(headers.get(play.api.http.HeaderNames.COOKIE).getOrElse(""), cookies)
+      Cookies.mergeCookieHeader(headers.get(play.api.http.HeaderNames.COOKIE).getOrElse(""), cookies)
     )
   }
 
@@ -94,7 +96,7 @@ case class FakeRequest[A](method: String, uri: String, headers: FakeHeaders, bod
    */
   def withSession(newSessions: (String, String)*): FakeRequest[A] = {
     withHeaders(play.api.http.HeaderNames.COOKIE ->
-      Cookies.merge(headers.get(play.api.http.HeaderNames.COOKIE).getOrElse(""),
+      Cookies.mergeCookieHeader(headers.get(play.api.http.HeaderNames.COOKIE).getOrElse(""),
         Seq(Session.encodeAsCookie(new Session(session.data ++ newSessions)))
       )
     )
@@ -108,21 +110,6 @@ case class FakeRequest[A](method: String, uri: String, headers: FakeHeaders, bod
   }
 
   def certs = Future.successful(IndexedSeq.empty)
-
-  /**
-   * Sets a JSON body to this request.
-   * The content type is set to <tt>application/json</tt>.
-   * The method is set to <tt>POST</tt>.
-   *
-   * @param node the JSON Node.
-   * @param _method The request HTTP method, <tt>POST</tt> by default.
-   * @return the current fake request
-   */
-  @deprecated("Use FakeRequest(method, path) to specify the method", "2.1.0")
-  def withJsonBody(node: JsValue, _method: String): FakeRequest[AnyContentAsJson] = {
-    _copy(method = _method, body = AnyContentAsJson(node))
-      .withHeaders(play.api.http.HeaderNames.CONTENT_TYPE -> "application/json")
-  }
 
   /**
    * Adds a JSON body to the request.
@@ -196,6 +183,7 @@ object FakeRequest {
   }
 }
 
+import play.api.Application
 /**
  * A Fake application.
  *
@@ -206,47 +194,67 @@ object FakeRequest {
  * @param additionalConfiguration Additional configuration
  * @param withRoutes A partial function of method name and path to a handler for handling the request
  */
-
-import play.api.{ Application, WithDefaultConfiguration, WithDefaultGlobal, WithDefaultPlugins }
 case class FakeApplication(
-  override val path: java.io.File = new java.io.File("."),
-  override val classloader: ClassLoader = classOf[FakeApplication].getClassLoader,
-  val additionalPlugins: Seq[String] = Nil,
-  val withoutPlugins: Seq[String] = Nil,
-  val additionalConfiguration: Map[String, _ <: Any] = Map.empty,
-  val withGlobal: Option[play.api.GlobalSettings] = None,
-  val withRoutes: PartialFunction[(String, String), Handler] = PartialFunction.empty) extends {
-  override val sources = None
-  override val mode = play.api.Mode.Test
-} with Application with WithDefaultConfiguration with WithDefaultGlobal with WithDefaultPlugins {
-  override def pluginClasses = {
-    additionalPlugins ++ super.pluginClasses.diff(withoutPlugins)
-  }
+    override val path: java.io.File = new java.io.File("."),
+    override val classloader: ClassLoader = classOf[FakeApplication].getClassLoader,
+    additionalPlugins: Seq[String] = Nil,
+    withoutPlugins: Seq[String] = Nil,
+    additionalConfiguration: Map[String, _ <: Any] = Map.empty,
+    withGlobal: Option[play.api.GlobalSettings] = None,
+    withRoutes: PartialFunction[(String, String), Handler] = PartialFunction.empty) extends Application {
 
-  override def configuration = {
-    super.configuration ++ play.api.Configuration.from(additionalConfiguration)
-  }
+  private val app: Application = new GuiceApplicationBuilder()
+    .in(Environment(path, classloader, Mode.Test))
+    .global(withGlobal.orNull)
+    .configure(additionalConfiguration)
+    .bindings(
+      bind[FakePluginsConfig] to FakePluginsConfig(additionalPlugins, withoutPlugins),
+      bind[FakeRouterConfig] to FakeRouterConfig(withRoutes))
+    .overrides(
+      bind[Plugins].toProvider[FakePluginsProvider],
+      bind[Router].toProvider[FakeRouterProvider])
+    .build
 
-  override lazy val global = withGlobal.getOrElse(super.global)
+  override def mode: Mode.Mode = app.mode
+  override def global: GlobalSettings = app.global
+  override def configuration: Configuration = app.configuration
+  override def actorSystem: ActorSystem = app.actorSystem
+  override def plugins: Seq[Plugin.Deprecated] = app.plugins
+  override def requestHandler: HttpRequestHandler = app.requestHandler
+  override def errorHandler: HttpErrorHandler = app.errorHandler
+  override def stop(): Future[Unit] = app.stop()
+  override def injector: Injector = app.injector
+}
 
-  override lazy val routes: Option[Router.Routes] = {
-    val parentRoutes = loadRoutes
-    Some(new Router.Routes() {
-      def documentation = parentRoutes.map(_.documentation).getOrElse(Nil)
-      // Use withRoutes first, then delegate to the parentRoutes if no route is defined
-      val routes = new AbstractPartialFunction[RequestHeader, Handler] {
-        override def applyOrElse[A <: RequestHeader, B >: Handler](rh: A, default: A => B) =
-          withRoutes.applyOrElse((rh.method, rh.path), (_: (String, String)) => default(rh))
-        def isDefinedAt(rh: RequestHeader) = withRoutes.isDefinedAt((rh.method, rh.path))
-      } orElse new AbstractPartialFunction[RequestHeader, Handler] {
-        override def applyOrElse[A <: RequestHeader, B >: Handler](rh: A, default: A => B) =
-          parentRoutes.map(_.routes.applyOrElse(rh, default)).getOrElse(default(rh))
-        def isDefinedAt(x: RequestHeader) = parentRoutes.map(_.routes.isDefinedAt(x)).getOrElse(false)
-      }
-      def setPrefix(prefix: String) {
-        parentRoutes.foreach(_.setPrefix(prefix))
-      }
-      def prefix = parentRoutes.map(_.prefix).getOrElse("")
-    })
+private case class FakePluginsConfig(additionalPlugins: Seq[String], withoutPlugins: Seq[String])
+
+private class FakePluginsProvider @Inject() (config: FakePluginsConfig, environment: Environment, injector: Injector) extends Provider[Plugins] {
+  lazy val get: Plugins = {
+    val pluginClasses = config.additionalPlugins ++ Plugins.loadPluginClassNames(environment).diff(config.withoutPlugins)
+    new Plugins(Plugins.loadPlugins(pluginClasses, environment, injector).toIndexedSeq)
   }
+}
+
+private class FakeRoutes(
+    injected: PartialFunction[(String, String), Handler], fallback: Router) extends Router {
+  def documentation = fallback.documentation
+  // Use withRoutes first, then delegate to the parentRoutes if no route is defined
+  val routes = new AbstractPartialFunction[RequestHeader, Handler] {
+    override def applyOrElse[A <: RequestHeader, B >: Handler](rh: A, default: A => B) =
+      injected.applyOrElse((rh.method, rh.path), (_: (String, String)) => default(rh))
+    def isDefinedAt(rh: RequestHeader) = injected.isDefinedAt((rh.method, rh.path))
+  } orElse new AbstractPartialFunction[RequestHeader, Handler] {
+    override def applyOrElse[A <: RequestHeader, B >: Handler](rh: A, default: A => B) =
+      fallback.routes.applyOrElse(rh, default)
+    def isDefinedAt(x: RequestHeader) = fallback.routes.isDefinedAt(x)
+  }
+  def withPrefix(prefix: String) = {
+    new FakeRoutes(injected, fallback.withPrefix(prefix))
+  }
+}
+
+private case class FakeRouterConfig(withRoutes: PartialFunction[(String, String), Handler])
+
+private class FakeRouterProvider @Inject() (config: FakeRouterConfig, parent: RoutesProvider) extends Provider[Router] {
+  lazy val get: Router = new FakeRoutes(config.withRoutes, parent.get)
 }

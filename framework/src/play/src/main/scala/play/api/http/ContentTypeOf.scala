@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.api.http
 
@@ -7,8 +7,8 @@ import play.api.mvc._
 import play.api._
 import play.api.http.Status._
 import play.api.http.HeaderNames._
-import play.api.templates._
 import play.api.libs.json._
+import play.twirl.api._
 
 import scala.annotation._
 

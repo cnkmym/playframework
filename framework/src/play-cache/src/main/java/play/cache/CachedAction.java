@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.cache;
 
@@ -11,21 +11,16 @@ import play.mvc.Http.*;
  * Cache another action.
  */
 public class CachedAction extends Action<Cached> {
-    
-    public F.Promise<SimpleResult> call(Context ctx) {
+
+    public F.Promise<Result> call(Context ctx) {
         try {
             final String key = configuration.key();
             final Integer duration = configuration.duration();
-            SimpleResult result = (SimpleResult) Cache.get(key);
-            F.Promise<SimpleResult> promise;
+            Result result = (Result) Cache.get(key);
+            F.Promise<Result> promise;
             if(result == null) {
                 promise = delegate.call(ctx);
-                promise.onRedeem(new F.Callback<SimpleResult>() {
-                    @Override
-                    public void invoke(SimpleResult simpleResult) throws Throwable {
-                        Cache.set(key, simpleResult, duration);
-                    }
-                });
+                promise.onRedeem(result1 -> Cache.set(key, result1, duration));
             } else {
                 promise = F.Promise.pure(result);
             }

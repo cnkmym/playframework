@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.core.utils
 
@@ -29,5 +29,5 @@ object ThreadsSpec extends Specification {
       }
     }
   }
-  val testClassLoader = new ClassLoader(){}
+  val testClassLoader = new ClassLoader() {}
 }

@@ -1,9 +1,9 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.data
 
-import validation.Constraints.{MaxLength, Required}
+import validation.Constraints.{ MaxLength, Required }
 import beans.BeanProperty
 import org.specs2.mutable.Specification
 import scala.collection.JavaConverters._

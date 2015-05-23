@@ -1,10 +1,10 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.it.action
 
-import play.api.test.{FakeRequest, PlaySpecification}
-import play.api.mvc.{SimpleResult, Action, Controller}
+import play.api.test.{ FakeRequest, PlaySpecification }
+import play.api.mvc.{ Action, Controller }
 import scala.concurrent.Future
 
 object ContentNegotiationSpec extends PlaySpecification with Controller {

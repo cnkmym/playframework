@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.core.parsers
 
@@ -19,7 +19,7 @@ object FormUrlEncodedParserSpec extends Specification {
     "ensure field order is retained, when requested" in {
       val url_encoded = "Zero=zero&One=one&Two=two&Three=three&Four=four&Five=five&Six=six&Seven=seven"
       val result: Map[String, Seq[String]] = FormUrlEncodedParser.parse(url_encoded)
-      val strings = ( for ( k <- result.keysIterator ) yield "&" + k + "=" + result(k).head ).mkString
+      val strings = (for (k <- result.keysIterator) yield "&" + k + "=" + result(k).head).mkString
       val reconstructed = strings.substring(1)
       reconstructed must equalTo(url_encoded)
     }

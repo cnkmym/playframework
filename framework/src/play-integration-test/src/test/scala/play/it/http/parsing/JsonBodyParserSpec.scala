@@ -1,21 +1,24 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.it.http.parsing
 
 import play.api.libs.iteratee.Enumerator
-import play.api.libs.json.{Json, JsError}
+import play.api.libs.json.{ Json, JsError }
 import play.api.mvc.Results.BadRequest
-import play.api.mvc.{BodyParser, BodyParsers}
+import play.api.mvc.{ BodyParser, BodyParsers }
 import play.api.test._
 
 object JsonBodyParserSpec extends PlaySpecification {
+
+  private case class Foo(a: Int, b: String)
+  private implicit val fooFormat = Json.format[Foo]
 
   "The JSON body parser" should {
 
     def parse[A](json: String, contentType: Option[String], encoding: String, bodyParser: BodyParser[A] = BodyParsers.parse.tolerantJson) = {
       await(Enumerator(json.getBytes(encoding)) |>>>
-        bodyParser(FakeRequest().withHeaders(contentType.map(CONTENT_TYPE -> _).toSeq:_*)))
+        bodyParser(FakeRequest().withHeaders(contentType.map(CONTENT_TYPE -> _).toSeq: _*)))
     }
 
     "parse JSON bodies" in new WithApplication() {
@@ -61,6 +64,8 @@ object JsonBodyParserSpec extends PlaySpecification {
     }
 
     "validate json content using .validate" in new WithApplication() {
+      import scala.concurrent.ExecutionContext.Implicits.global
+
       val fooParser = BodyParsers.parse.json.validate {
         _.validate[Foo].asEither.left.map(e => BadRequest(JsError.toFlatJson(e)))
       }
@@ -79,8 +84,5 @@ object JsonBodyParserSpec extends PlaySpecification {
     }
 
   }
-
-  private case class Foo(a: Int, b: String)
-  private implicit val fooFormat = Json.format[Foo]
 
 }

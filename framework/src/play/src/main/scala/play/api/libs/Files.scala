@@ -1,12 +1,10 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.api.libs
 
-import scalax.io._
-import scalax.file._
-
 import java.io._
+import java.nio.file.{ FileAlreadyExistsException, StandardCopyOption }
 
 /**
  * FileSystem utilities.
@@ -29,14 +27,23 @@ object Files {
     /**
      * Move the file.
      */
-    def moveTo(to: File, replace: Boolean = false) {
-      Files.moveFile(file, to, replace = replace)
+    def moveTo(to: File, replace: Boolean = false): File = {
+      try {
+        if (replace)
+          java.nio.file.Files.move(file.toPath, to.toPath, StandardCopyOption.REPLACE_EXISTING)
+        else
+          java.nio.file.Files.move(file.toPath, to.toPath)
+      } catch {
+        case ex: FileAlreadyExistsException => to
+      }
+
+      to
     }
 
     /**
      * Delete this file on garbage collection.
      */
-    override def finalize {
+    override def finalize() {
       clean()
     }
 
@@ -64,54 +71,4 @@ object Files {
     }
 
   }
-
-  /**
-   * Copy a file.
-   */
-  def copyFile(from: File, to: File, copyAttributes: Boolean = true, replaceExisting: Boolean = true): Path = {
-    Path(from).copyTo(target = Path(to), copyAttributes = copyAttributes, replaceExisting = replaceExisting)
-  }
-
-  /**
-   * Rename a file.
-   */
-  def moveFile(from: File, to: File, replace: Boolean = true, atomicMove: Boolean = true): Path = {
-    Path(from).moveTo(target = Path(to), replace = replace, atomicMove = atomicMove)
-  }
-
-  /**
-   * Reads a file’s contents into a String.
-   *
-   * @param path the file to read.
-   * @return the file contents
-   */
-  def readFile(path: File): String = Path(path).string
-
-  /**
-   * Write a file’s contents as a `String`.
-   *
-   * @param path the file to write to
-   * @param content the contents to write
-   */
-  def writeFile(path: File, content: String): Unit = Path(path).write(content)
-
-  /**
-   * Creates a directory.
-   *
-   * @param path the directory to create
-   */
-  def createDirectory(path: File): Path = Path(path).createDirectory(failIfExists = false)
-
-  /**
-   * Writes a file’s content as String, only touching the file if the actual file content is different.
-   *
-   * @param path the file to write to
-   * @param content the contents to write
-   */
-  def writeFileIfChanged(path: File, content: String) {
-    if (content != Option(path).filter(_.exists).map(readFile(_)).getOrElse("")) {
-      writeFile(path, content)
-    }
-  }
-
 }

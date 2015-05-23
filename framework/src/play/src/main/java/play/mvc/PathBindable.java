@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.mvc;
 
@@ -12,7 +12,7 @@ package play.mvc;
  * For example, the following type could be used to bind an Ebean user:
  *
  * <pre>
- * @Entity
+ * &#64;Entity
  * class User extends Model implements PathBindable&lt;User&gt; {
  *     public String email;
  *     public String name;

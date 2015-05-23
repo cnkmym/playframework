@@ -1,4 +1,4 @@
-<!--- Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com> -->
+<!--- Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com> -->
 # Setting up a front end HTTP server
 
 You can easily deploy your application as a stand-alone server by setting the application HTTP port to 80:
@@ -23,18 +23,18 @@ The `/etc/lighttpd/lighttpd.conf` file should define things like this:
 server.modules = (
       "mod_access",
       "mod_proxy",
-      "mod_accesslog" 
+      "mod_accesslog"
 )
 …
 $HTTP["host"] =~ "www.myapp.com" {
     proxy.balance = "round-robin" proxy.server = ( "/" =>
         ( ( "host" => "127.0.0.1", "port" => 9000 ) ) )
 }
- 
+
 $HTTP["host"] =~ "www.loadbalancedapp.com" {
-    proxy.balance = "round-robin" proxy.server = ( "/" => ( 
-          ( "host" => "127.0.0.1", "port" => 9001 ), 
-          ( "host" => "127.0.0.1", "port" => 9002 ) ) 
+    proxy.balance = "round-robin" proxy.server = ( "/" => (
+          ( "host" => "127.0.0.1", "port" => 9001 ),
+          ( "host" => "127.0.0.1", "port" => 9002 ) )
     )
 }
 ```
@@ -107,7 +107,7 @@ http {
 
 ## Set up with Apache
 
-The example below shows a simple set up with [Apache httpd server](http://httpd.apache.org/) running in front of a standard Play configuration.
+The example below shows a simple set up with [Apache httpd server](https://httpd.apache.org/) running in front of a standard Play configuration.
 
 ```
 LoadModule proxy_module modules/mod_proxy.so
@@ -190,7 +190,7 @@ Apache also provides a way to view the status of your cluster. Simply point your
 
 Because Play is completely stateless you don’t have to manage sessions between the 2 clusters. You can actually easily scale to more than 2 Play instances.
 
-Note that [Apache does not support Websockets](https://issues.apache.org/bugzilla/show_bug.cgi?id=47485), so you may wish to use another front end proxy (such as haproxy or nginx) that does implement this functionality.
+Note that [Apache does not support Websockets](https://issues.apache.org/bugzilla/show_bug.cgi?id=47485), so you may wish to use another front end proxy (such as [HAProxy](http://www.haproxy.org/) or Nginx) that does implement this functionality.
 
 Note that [ProxyPassReverse might rewrite incorrectly headers](https://issues.apache.org/bugzilla/show_bug.cgi?id=51982) adding an extra / to the URIs, so you may wish to use this workaround:
 ```
@@ -198,4 +198,21 @@ ProxyPassReverse / http://localhost:9999
 ProxyPassReverse / http://localhost:9998
 ```
 
-> **Next:** [[Configuring HTTPS|ConfiguringHttps]]
+## Configure trusted proxies
+
+To determine the client IP address Play has to know which are the trusted proxies in your network.
+
+Those can be configured with `play.http.forwarded.trustedProxies`. You can define a list of proxies
+and/or subnet masks that Play recognizes as belonging to your network.
+
+Default is `127.0.0.1` and `::FF`
+
+There exists two possibilities how proxies are set in the HTTP-headers:
+
+  * the legacy method with X-Forwarded headers
+  * the RFC 7239 with Forwarded headers
+
+The type of header to parse is set via `play.http.forwarded.version`. Valid values are `x-forwarded` or `rfc7239`.
+The default is `x-forwarded`.
+
+For more information, please read the [RFC 7239](https://tools.ietf.org/html/rfc7239).

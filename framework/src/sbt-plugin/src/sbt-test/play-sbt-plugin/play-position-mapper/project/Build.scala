@@ -1,6 +1,8 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
+
+import play.sbt.PlayScala
 import sbt._
 import Keys._
 
@@ -39,19 +41,21 @@ object ApplicationBuild extends Build {
     true
   }
 
-  val checkLogContainsTask = InputKey[Boolean]("check-log-contains") <<=
+  val checkLogContainsTask = InputKey[Boolean]("checkLogContains") <<=
     InputTask.separate[String, Boolean](simpleParser _)(state(s => checkLogContains))
 
-  val compileIgnoreErrorsTask = TaskKey[Unit]("compile-ignore-errors") <<= state.map { state =>
+  val compileIgnoreErrorsTask = TaskKey[Unit]("compileIgnoreErrors") <<= state.map { state =>
     Project.runTask(compile in Compile, state)
   }
 
-  val main = play.Project(appName, appVersion).settings(
+  val main = Project(appName, file(".")).enablePlugins(PlayScala).settings(
+    version := appVersion,
     extraLoggers ~= { currentFunction =>
       (key: ScopedKey[_]) => {
         bufferLogger +: currentFunction(key)
       }
     },
+    scalaVersion := sys.props.get("scala.version").getOrElse("2.10.5"),
     checkLogContainsTask,
     compileIgnoreErrorsTask
   )

@@ -1,11 +1,17 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.mvc;
 
 import play.i18n.Lang;
-import play.mvc.Http.*;
 
+import play.mvc.Http.HeaderNames;
+import play.mvc.Http.Response;
+import play.mvc.Http.Context;
+import play.mvc.Http.Request;
+import play.mvc.Http.Session;
+import play.mvc.Http.Status;
+import play.mvc.Http.Flash;
 
 /**
  * Superclass for a Java-based controller.
@@ -35,7 +41,7 @@ public abstract class Controller extends Results implements Status, HeaderNames 
 
     /**
      * Change durably the lang for the current user
-     * @param code New lang code to use (e.g. "fr", "en_US", etc.)
+     * @param code New lang code to use (e.g. "fr", "en-US", etc.)
      * @return true if the requested lang was supported by the application, otherwise false.
      */
     public static boolean changeLang(String code) {

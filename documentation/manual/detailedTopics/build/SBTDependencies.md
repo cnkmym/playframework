@@ -1,4 +1,4 @@
-<!--- Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com> -->
+<!--- Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com> -->
 # Managing library dependencies
 
 ## Unmanaged dependencies
@@ -18,21 +18,21 @@ Most of the time you can simply list your dependencies in the `build.sbt` file.
 Declaring a dependency looks like this (defining `group`, `artifact` and `revision`):
 
 ```scala
-libraryDependencies += "org.apache.derby" % "derby" % "10.4.1.3"
+libraryDependencies += "org.apache.derby" % "derby" % "10.11.1.1"
 ```
 
 or like this, with an optional `configuration`:
 
 ```scala
-libraryDependencies += "org.apache.derby" % "derby" % "10.4.1.3" % "test"
+libraryDependencies += "org.apache.derby" % "derby" % "10.11.1.1" % "test"
 ```
 
 Multiple dependencies can be added either by multiple declarations like the above, or you can provide a Scala sequence:
 
 ```scala
 libraryDependencies ++= Seq(
-  "org.apache.derby" % "derby" % "10.4.1.3",
-  "org.hibernate" % "hibernate-entitymanager" % "3.6.9.Final"
+  "org.apache.derby" % "derby" % "10.11.1.1",
+  "org.hibernate" % "hibernate-entitymanager" % "4.3.9.Final"
 )
 ```
 
@@ -56,7 +56,7 @@ libraryDependencies += "org.scala-tools" %% "scala-stm" % "0.3"
 
 ### Resolvers
 
-sbt uses the standard Maven2 repository and the Typesafe Releases (<http://repo.typesafe.com/typesafe/releases>) repositories by default. If your dependency isn’t on one of the default repositories, you’ll have to add a resolver to help Ivy find it.
+sbt uses the standard Maven2 repository and the Typesafe Releases (<https://repo.typesafe.com/typesafe/releases>) repositories by default. If your dependency isn’t on one of the default repositories, you’ll have to add a resolver to help Ivy find it.
 
 Use the `resolvers` setting key to add your own resolver.
 
@@ -78,5 +78,3 @@ resolvers += (
 )
 ```
 
-
-> **Next:** [[Working with sub-projects | SBTSubProjects]]

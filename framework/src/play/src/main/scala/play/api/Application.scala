@@ -1,173 +1,27 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.api
 
-import play.core._
-import play.utils._
+import javax.inject.Inject
 
-import play.api.mvc._
+import akka.actor.ActorSystem
+import com.google.inject.Singleton
+import play.api.http._
+import play.api.mvc.EssentialFilter
+import play.api.routing.Router
+import play.api.inject.{ SimpleInjector, NewInstanceInjector, Injector, DefaultApplicationLifecycle }
+import play.api.libs.{ Crypto, CryptoConfigParser, CryptoConfig }
+import play.api.libs.concurrent.ActorSystemProvider
+import play.core.{ SourceMapper, WebCommands }
+import play.utils._
 
 import java.io._
 
 import annotation.implicitNotFound
 
-import java.lang.reflect.InvocationTargetException
 import reflect.ClassTag
-import scala.util.control.NonFatal
-import scala.concurrent.{ Future, ExecutionException }
-
-trait WithDefaultGlobal {
-  self: Application with WithDefaultConfiguration =>
-
-  // -- Global stuff
-
-  private lazy val globalClass = initialConfiguration.getString("application.global").getOrElse(initialConfiguration.getString("global").map { g =>
-    Play.logger.warn("`global` key is deprecated, please change `global` key to `application.global`")
-    g
-  }.getOrElse("Global"))
-
-  lazy private val javaGlobal: Option[play.GlobalSettings] = try {
-    Option(self.classloader.loadClass(globalClass).newInstance().asInstanceOf[play.GlobalSettings])
-  } catch {
-    case e: InstantiationException => None
-    case e: ClassNotFoundException => None
-  }
-
-  lazy private val scalaGlobal: GlobalSettings = try {
-    self.classloader.loadClass(globalClass + "$").getDeclaredField("MODULE$").get(null).asInstanceOf[GlobalSettings]
-  } catch {
-    case e: ClassNotFoundException if !initialConfiguration.getString("application.global").isDefined => DefaultGlobal
-    case e if initialConfiguration.getString("application.global").isDefined => {
-      throw initialConfiguration.reportError("application.global", "Cannot initialize the custom Global object (%s) (perhaps it's a wrong reference?)", Some(e))
-    }
-  }
-
-  /**
-   * The global settings object used by this application.
-   *
-   * @see play.api.GlobalSettings
-   */
-  private lazy val globalInstance: GlobalSettings = Threads.withContextClassLoader(self.classloader) {
-    try {
-      javaGlobal.map(new j.JavaGlobalSettingsAdapter(_)).getOrElse(scalaGlobal)
-    } catch {
-      case e: PlayException => throw e
-      case e: ThreadDeath => throw e
-      case e: VirtualMachineError => throw e
-      case e: Throwable => throw new PlayException(
-        "Cannot init the Global object",
-        e.getMessage,
-        e
-      )
-    }
-  }
-
-  def global: GlobalSettings = {
-    globalInstance
-  }
-}
-
-trait WithDefaultConfiguration {
-  self: Application =>
-
-  protected lazy val initialConfiguration = Threads.withContextClassLoader(self.classloader) {
-    Configuration.load(path, mode, this match {
-      case dev: DevSettings => dev.devSettings
-      case _ => Map.empty
-    })
-  }
-
-  private lazy val fullConfiguration = global.onLoadConfig(initialConfiguration, path, classloader, mode)
-
-  def configuration: Configuration = fullConfiguration
-
-}
-
-trait WithDefaultPlugins {
-  self: Application =>
-
-  private[api] def pluginClasses: Seq[String] = {
-
-    import scalax.file._
-    import scalax.io.JavaConverters._
-    import scala.collection.JavaConverters._
-
-    val PluginDeclaration = """([0-9_]+):(.*)""".r
-
-    val pluginFiles = self.classloader.getResources("play.plugins").asScala.toList ++ self.classloader.getResources("conf/play.plugins").asScala.toList
-
-    pluginFiles.distinct.map { plugins =>
-      (plugins.asInput.string.split("\n").map(_.replaceAll("#.*$", "").trim)).filterNot(_.isEmpty).map {
-        case PluginDeclaration(priority, className) => (priority.toInt, className)
-      }
-    }.flatten.sortBy(_._1).map(_._2)
-
-  }
-
-  /**
-   * The plugins list used by this application.
-   *
-   * Plugin classes must extend play.api.Plugin and are automatically discovered
-   * by searching for all play.plugins files in the classpath.
-   *
-   * A play.plugins file contains a list of plugin classes to be loaded, and sorted by priority:
-   *
-   * {{{
-   * 100:play.api.i18n.MessagesPlugin
-   * 200:play.api.db.DBPlugin
-   * 250:play.api.cache.BasicCachePlugin
-   * 300:play.db.ebean.EbeanPlugin
-   * 400:play.db.jpa.JPAPlugin
-   * 500:play.api.db.evolutions.EvolutionsPlugin
-   * 1000:play.api.libs.akka.AkkaPlugin
-   * 10000:play.api.GlobalPlugin
-   * }}}
-   *
-   * @see play.api.Plugin
-   */
-  lazy val plugins: Seq[Plugin] = Threads.withContextClassLoader(classloader) {
-
-    pluginClasses.map { className =>
-      try {
-        val plugin = classloader.loadClass(className).getConstructor(classOf[Application]).newInstance(this).asInstanceOf[Plugin]
-        if (plugin.enabled) Some(plugin) else { Play.logger.debug("Plugin [" + className + "] is disabled"); None }
-      } catch {
-        case e: java.lang.NoSuchMethodException => {
-          try {
-            val plugin = classloader.loadClass(className).getConstructor(classOf[play.Application]).newInstance(new play.Application(this)).asInstanceOf[Plugin]
-            if (plugin.enabled) Some(plugin) else { Play.logger.warn("Plugin [" + className + "] is disabled"); None }
-          } catch {
-            case e: java.lang.NoSuchMethodException =>
-              throw new PlayException("Cannot load plugin",
-                "Could not find an appropriate constructor to instantiate plugin [" + className +
-                  "]. All Play plugins must define a constructor that accepts a single argument either of type " +
-                  "play.Application for Java plugins or play.api.Application for Scala plugins.")
-            case e: PlayException => throw e
-            case e: VirtualMachineError => throw e
-            case e: ThreadDeath => throw e
-            case e: Throwable => throw new PlayException(
-              "Cannot load plugin",
-              "Plugin [" + className + "] cannot be instantiated.",
-              e)
-          }
-        }
-        case e: InvocationTargetException => throw new PlayException(
-          "Cannot load plugin",
-          "An exception occurred during Plugin [" + className + "] initialization",
-          e.getTargetException)
-        case e: PlayException => throw e
-        case e: ThreadDeath => throw e
-        case e: VirtualMachineError => throw e
-        case e: Throwable => throw new PlayException(
-          "Cannot load plugin",
-          "Plugin [" + className + "] cannot be instantiated.",
-          e)
-      }
-    }.flatten
-
-  }
-}
+import scala.concurrent.Future
 
 /**
  * A Play application.
@@ -197,18 +51,13 @@ trait Application {
   def classloader: ClassLoader
 
   /**
-   * The `SourceMapper` used to retrieve source code displayed in error pages
-   */
-  def sources: Option[SourceMapper]
-
-  /**
    * `Dev`, `Prod` or `Test`
    */
   def mode: Mode.Mode
 
-  def global: GlobalSettings
+  def global: GlobalSettings = injector.instanceOf[GlobalSettings]
   def configuration: Configuration
-  def plugins: Seq[Plugin]
+  def plugins: Seq[Plugin.Deprecated]
 
   /**
    * Retrieves a plugin of type `T`.
@@ -241,87 +90,38 @@ trait Application {
   def plugin[T](implicit ct: ClassTag[T]): Option[T] = plugin(ct.runtimeClass).asInstanceOf[Option[T]]
 
   /**
-   * The router used by this application (if defined).
+   * The default ActorSystem used by the application.
    */
-  lazy val routes: Option[Router.Routes] = loadRoutes
+  def actorSystem: ActorSystem
 
-  protected def loadRoutes: Option[Router.Routes] = try {
-    Some(classloader.loadClass(configuration.getString("application.router").map(_ + "$").getOrElse("Routes$")).getDeclaredField("MODULE$").get(null).asInstanceOf[Router.Routes]).map { router =>
-      router.setPrefix(configuration.getString("application.context").map { prefix =>
-        if (!prefix.startsWith("/")) {
-          throw configuration.reportError("application.context", "Invalid application context")
-        }
-        prefix
-      }.getOrElse("/"))
-      router
+  /**
+   * Cached value of `routes`. For performance, don't synchronize
+   * the value. We always use the same logic to calculate its value
+   * so it will end up consistent across threads anyway.
+   */
+  private var cachedRoutes: Router = null
+
+  /**
+   * The router used by this application.
+   */
+  @deprecated("Either use HttpRequestHandler, or have the router injected", "2.4.0")
+  def routes: Router = {
+    // Use a cached value because the injector might be slow
+    if (cachedRoutes != null) cachedRoutes else {
+      cachedRoutes = injector.instanceOf[Router]
+      cachedRoutes
     }
-  } catch {
-    case e: ClassNotFoundException => configuration.getString("application.router").map { routerName =>
-      throw configuration.reportError("application.router", "Router not found: " + routerName)
-    }
-  }
-
-  // Reconfigure logger
-  {
-
-    val validValues = Set("TRACE", "DEBUG", "INFO", "WARN", "ERROR", "OFF", "INHERITED")
-    val setLevel = (level: String) => level match {
-      case "INHERITED" => null
-      case level => ch.qos.logback.classic.Level.toLevel(level)
-    }
-
-    Logger.configure(
-      Map("application.home" -> path.getAbsolutePath),
-      configuration.getConfig("logger").map { loggerConfig =>
-        loggerConfig.keys.map {
-          case "resource" | "file" | "url" => "" -> null
-          case key @ "root" => "ROOT" -> loggerConfig.getString(key, Some(validValues)).map(setLevel).get
-          case key => key -> loggerConfig.getString(key, Some(validValues)).map(setLevel).get
-        }.toMap
-      }.getOrElse(Map.empty),
-      mode)
-
   }
 
   /**
-   * Handle a runtime error during the execution of an action
+   * The HTTP request handler
    */
-  private[play] def handleError(request: RequestHeader, e: Throwable): Future[SimpleResult] = try {
-    e match {
-      case e: UsefulException => throw e
-      case e: ExecutionException => handleError(request, e.getCause)
-      case e: Throwable => {
+  def requestHandler: HttpRequestHandler
 
-        val source = sources.flatMap(_.sourceFor(e))
-
-        throw new PlayException.ExceptionSource(
-          "Execution exception",
-          "[%s: %s]".format(e.getClass.getSimpleName, e.getMessage),
-          e) {
-          def line = source.flatMap(_._2).map(_.asInstanceOf[java.lang.Integer]).orNull
-          def position = null
-          def input = source.map(_._1).map(scalax.file.Path(_).string).orNull
-          def sourceName = source.map(_._1.getAbsolutePath).orNull
-        }
-      }
-    }
-  } catch {
-    case NonFatal(e) => try {
-      Logger.error(
-        """
-        |
-        |! %sInternal server error, for (%s) [%s] ->
-        |""".stripMargin.format(e match {
-          case p: PlayException => "@" + p.id + " - "
-          case _ => ""
-        }, request.method, request.uri),
-        e
-      )
-      global.onError(request, e)
-    } catch {
-      case NonFatal(e) => DefaultGlobal.onError(request, e)
-    }
-  }
+  /**
+   * The HTTP error handler
+   */
+  def errorHandler: HttpErrorHandler
 
   /**
    * Retrieves a file relative to the application root path.
@@ -354,7 +154,7 @@ trait Application {
    * @param relativePath the relative path of the file to fetch
    * @return an existing file
    */
-  def getExistingFile(relativePath: String): Option[File] = Option(getFile(relativePath)).filter(_.exists)
+  def getExistingFile(relativePath: String): Option[File] = Some(getFile(relativePath)).filter(_.exists)
 
   /**
    * Scans the application classloader to retrieve a resource.
@@ -371,10 +171,8 @@ trait Application {
    * @return the resource URL, if found
    */
   def resource(name: String): Option[java.net.URL] = {
-    Option(classloader.getResource(Option(name).map {
-      case s if s.startsWith("/") => s.drop(1)
-      case s => s
-    }.get))
+    val n = name.stripPrefix("/")
+    Option(classloader.getResource(n))
   }
 
   /**
@@ -392,16 +190,96 @@ trait Application {
    * @return a stream, if found
    */
   def resourceAsStream(name: String): Option[InputStream] = {
-    Option(classloader.getResourceAsStream(Option(name).map {
-      case s if s.startsWith("/") => s.drop(1)
-      case s => s
-    }.get))
+    val n = name.stripPrefix("/")
+    Option(classloader.getResourceAsStream(n))
   }
 
+  /**
+   * Stop the application.  The returned future will be redeemed when all stop hooks have been run.
+   */
+  def stop(): Future[Unit]
+
+  /**
+   * Get the injector for this application.
+   *
+   * @return The injector.
+   */
+  def injector: Injector = NewInstanceInjector
 }
 
-class DefaultApplication(
-  override val path: File,
-  override val classloader: ClassLoader,
-  override val sources: Option[SourceMapper],
-  override val mode: Mode.Mode) extends Application with WithDefaultConfiguration with WithDefaultGlobal with WithDefaultPlugins
+object Application {
+  /**
+   * Creates a function that caches results of calls to
+   * `app.injector.instanceOf[T]`. The cache speeds up calls
+   * when called with the same Application each time, which is
+   * a big benefit in production. It still works properly if
+   * called with a different Application each time, such as
+   * when running unit tests, but it will run more slowly.
+   *
+   * Since values are cached, it's important that this is only
+   * used for singleton values.
+   *
+   * This method avoids synchronization so it's possible that
+   * the injector might be called more than once for a single
+   * instance if this method is called from different threads
+   * at the same time.
+   *
+   * The cache uses a WeakReference to both the Application and
+   * the returned instance so it will not cause memory leaks.
+   * Unlike WeakHashMap it doesn't use a ReferenceQueue, so values
+   * will still be cleaned even if the ReferenceQueue is never
+   * activated.
+   */
+  def instanceCache[T: ClassTag]: Application => T =
+    new InlineCache((app: Application) => app.injector.instanceOf[T])
+}
+
+class OptionalSourceMapper(val sourceMapper: Option[SourceMapper])
+
+@Singleton
+class DefaultApplication @Inject() (environment: Environment,
+    applicationLifecycle: DefaultApplicationLifecycle,
+    override val injector: Injector,
+    override val configuration: Configuration,
+    override val requestHandler: HttpRequestHandler,
+    override val errorHandler: HttpErrorHandler,
+    override val actorSystem: ActorSystem,
+    override val plugins: Plugins) extends Application {
+
+  def path = environment.rootPath
+
+  def classloader = environment.classLoader
+
+  def mode = environment.mode
+
+  def stop() = applicationLifecycle.stop()
+}
+
+/**
+ * Helper to provide the Play built in components.
+ */
+trait BuiltInComponents {
+  def environment: Environment
+  def sourceMapper: Option[SourceMapper]
+  def webCommands: WebCommands
+  def configuration: Configuration
+
+  def router: Router
+
+  lazy val injector: Injector = new SimpleInjector(NewInstanceInjector) + router + crypto + httpConfiguration
+
+  lazy val httpConfiguration: HttpConfiguration = HttpConfiguration.fromConfiguration(configuration)
+  lazy val httpRequestHandler: HttpRequestHandler = new DefaultHttpRequestHandler(router, httpErrorHandler, httpConfiguration, httpFilters: _*)
+  lazy val httpErrorHandler: HttpErrorHandler = new DefaultHttpErrorHandler(environment, configuration, sourceMapper,
+    Some(router))
+  lazy val httpFilters: Seq[EssentialFilter] = Nil
+
+  lazy val applicationLifecycle: DefaultApplicationLifecycle = new DefaultApplicationLifecycle
+  lazy val application: Application = new DefaultApplication(environment, applicationLifecycle, injector,
+    configuration, httpRequestHandler, httpErrorHandler, actorSystem, Plugins.empty)
+
+  lazy val actorSystem: ActorSystem = new ActorSystemProvider(environment, configuration, applicationLifecycle).get
+
+  lazy val cryptoConfig: CryptoConfig = new CryptoConfigParser(environment, configuration).get
+  lazy val crypto: Crypto = new Crypto(cryptoConfig)
+}

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.data;
 
@@ -8,6 +8,7 @@ import javax.validation.metadata.*;
 
 import java.util.*;
 import java.lang.annotation.*;
+import java.util.regex.Pattern;
 
 import static java.lang.annotation.ElementType.*;
 import static java.lang.annotation.RetentionPolicy.*;
@@ -15,6 +16,7 @@ import static java.lang.annotation.RetentionPolicy.*;
 import play.mvc.Http;
 import static play.libs.F.*;
 
+import play.libs.F.Tuple;
 import play.data.validation.*;
 
 import org.springframework.beans.*;
@@ -296,6 +298,28 @@ public class Form<T> {
     }
 
     /**
+     * When dealing with @ValidateWith annotations, and message parameter is not used in
+     * the annotation, extract the message from validator's getErrorMessageKey() method
+    **/
+    protected String getMessageForConstraintViolation(ConstraintViolation<Object> violation) {
+        String errorMessage = violation.getMessage();
+        Annotation annotation = violation.getConstraintDescriptor().getAnnotation();
+        if (annotation instanceof Constraints.ValidateWith) {
+            Constraints.ValidateWith validateWithAnnotation = (Constraints.ValidateWith)annotation;
+            if (violation.getMessage().equals(Constraints.ValidateWithValidator.defaultMessage)) {
+                Constraints.ValidateWithValidator validateWithValidator = new Constraints.ValidateWithValidator();
+                validateWithValidator.initialize(validateWithAnnotation);
+                Tuple<String, Object[]> errorMessageKey = validateWithValidator.getErrorMessageKey();
+                if (errorMessageKey != null && errorMessageKey._1 != null) {
+                    errorMessage = errorMessageKey._1;
+                }
+            }
+        }
+
+        return errorMessage;
+    }
+
+    /**
      * Binds data to this form - that is, handles form submission.
      *
      * @param data data to submit
@@ -306,18 +330,18 @@ public class Form<T> {
 
         DataBinder dataBinder = null;
         Map<String, String> objectData = data;
-        if(rootName == null) {
+        if (rootName == null) {
             dataBinder = new DataBinder(blankInstance());
         } else {
             dataBinder = new DataBinder(blankInstance(), rootName);
             objectData = new HashMap<String,String>();
-            for(String key: data.keySet()) {
-                if(key.startsWith(rootName + ".")) {
+            for (String key: data.keySet()) {
+                if (key.startsWith(rootName + ".")) {
                     objectData.put(key.substring(rootName.length() + 1), data.get(key));
                 }
             }
         }
-        if(allowedFields.length > 0) {
+        if (allowedFields.length > 0) {
             dataBinder.setAllowedFields(allowedFields);
         }
         SpringValidatorAdapter validator = new SpringValidatorAdapter(play.data.validation.Validation.getValidator());
@@ -342,7 +366,7 @@ public class Form<T> {
                     result.rejectValue(field,
                             violation.getConstraintDescriptor().getAnnotation().annotationType().getSimpleName(),
                             getArgumentsForConstraint(result.getObjectName(), field, violation.getConstraintDescriptor()),
-                            violation.getMessage());
+                            getMessageForConstraintViolation(violation));
                 }
                 catch (NotReadablePropertyException ex) {
                     throw new IllegalStateException("JSR-303 validated property '" + field +
@@ -352,53 +376,61 @@ public class Form<T> {
             }
         }
 
-        if(result.hasErrors()) {
+        if (result.hasErrors() || result.getGlobalErrorCount() > 0) {
             Map<String,List<ValidationError>> errors = new HashMap<String,List<ValidationError>>();
-            for(FieldError error: result.getFieldErrors()) {
+            for (FieldError error: result.getFieldErrors()) {
                 String key = error.getObjectName() + "." + error.getField();
-                if(key.startsWith("target.") && rootName == null) {
+                if (key.startsWith("target.") && rootName == null) {
                     key = key.substring(7);
                 }
-                List<Object> arguments = new ArrayList<Object>();
-                for(Object arg: error.getArguments()) {
-                    if(!(arg instanceof org.springframework.context.support.DefaultMessageSourceResolvable)) {
-                        arguments.add(arg);
-                    }                    
-                }
-                if(!errors.containsKey(key)) {
+                if (!errors.containsKey(key)) {
                    errors.put(key, new ArrayList<ValidationError>());
                 }
 
                 ValidationError validationError = null;
-                if( error.isBindingFailure() ){
+                if (error.isBindingFailure()) {
                     ImmutableList.Builder<String> builder = ImmutableList.builder();
-                    for( String code: error.getCodes() ){
+                    for (String code: error.getCodes()) {
                         builder.add( code.replace("typeMismatch", "error.invalid") );
                     }
-                    validationError = new ValidationError(key, builder.build(), arguments);
-                }else{
-                    validationError = new ValidationError(key, error.getDefaultMessage(), arguments);
+                    validationError = new ValidationError(key, builder.build(),
+                            convertErrorArguments(error.getArguments()));
+                } else {
+                    validationError = new ValidationError(key, error.getDefaultMessage(),
+                            convertErrorArguments(error.getArguments()));
                 }
                 errors.get(key).add(validationError);
             }
+
+            List<ValidationError> globalErrors = new ArrayList<ValidationError>();
+
+            for (ObjectError error: result.getGlobalErrors()) {
+                globalErrors.add(new ValidationError("", error.getDefaultMessage(),
+                        convertErrorArguments(error.getArguments())));
+            }
+
+            if (!globalErrors.isEmpty()) {
+                errors.put("", globalErrors);
+            }
+
             return new Form(rootName, backedType, data, errors, None(), groups);
         } else {
             Object globalError = null;
-            if(result.getTarget() != null) {
+            if (result.getTarget() != null) {
                 try {
                     java.lang.reflect.Method v = result.getTarget().getClass().getMethod("validate");
                     globalError = v.invoke(result.getTarget());
-                } catch(NoSuchMethodException e) {
-                } catch(Throwable e) {
+                } catch (NoSuchMethodException e) {
+                } catch (Throwable e) {
                     throw new RuntimeException(e);
                 }
             }
-            if(globalError != null) {
+            if (globalError != null) {
                 Map<String,List<ValidationError>> errors = new HashMap<String,List<ValidationError>>();
-                if(globalError instanceof String) {
+                if (globalError instanceof String) {
                     errors.put("", new ArrayList<ValidationError>());
                     errors.get("").add(new ValidationError("", (String)globalError, new ArrayList()));
-                } else if(globalError instanceof List) {
+                } else if (globalError instanceof List) {
                     for (ValidationError error : (List<ValidationError>) globalError) {
                       List<ValidationError> errorsForKey = errors.get(error.key());
                       if (errorsForKey == null) {
@@ -406,13 +438,29 @@ public class Form<T> {
                       }
                       errorsForKey.add(error);
                     }
-                } else if(globalError instanceof Map) {
+                } else if (globalError instanceof Map) {
                     errors = (Map<String,List<ValidationError>>)globalError;
                 }
                 return new Form(rootName, backedType, data, errors, None(), groups);
             }
             return new Form(rootName, backedType, new HashMap<String,String>(data), new HashMap<String,List<ValidationError>>(errors), Some((T)result.getTarget()), groups);
         }
+    }
+
+    /**
+     * Convert the error arguments.
+     *
+     * @param arguments The arguments to convert.
+     * @return The converted arguments.
+     */
+    private List<Object> convertErrorArguments(Object[] arguments) {
+        List<Object> converted = new ArrayList<Object>(arguments.length);
+        for(Object arg: arguments) {
+            if(!(arg instanceof org.springframework.context.support.DefaultMessageSourceResolvable)) {
+                converted.add(arg);
+            }
+        }
+        return Collections.unmodifiableList(converted);
     }
 
     /**
@@ -536,8 +584,13 @@ public class Form<T> {
 
     /**
      * Gets the concrete value if the submission was a success.
+     *
+     * @throws IllegalStateException if there are errors binding the form, including the errors as JSON in the message
      */
     public T get() {
+        if (!errors.isEmpty()) {
+            throw new IllegalStateException("Error(s) binding form: " + errorsAsJson());
+        }
         return value.get();
     }
 
@@ -785,7 +838,6 @@ public class Form<T> {
          */
         @SuppressWarnings("rawtypes")
         public List<Integer> indexes() {
-            List<Integer> result = new ArrayList<Integer>();
             if(form.value().isDefined()) {
                 BeanWrapper beanWrapper = new BeanWrapperImpl(form.value().get());
                 beanWrapper.setAutoGrowNestedPaths(true);
@@ -793,6 +845,8 @@ public class Form<T> {
                 if(form.name() != null && name.startsWith(form.name() + ".")) {
                     objectKey = name.substring(form.name().length() + 1);
                 }
+
+                List<Integer> result = new ArrayList<Integer>();
                 if(beanWrapper.isReadableProperty(objectKey)) {
                     Object value = beanWrapper.getPropertyValue(objectKey);
                     if(value instanceof Collection) {
@@ -801,16 +855,24 @@ public class Form<T> {
                         }
                     }
                 }
+
+                return result;
+
             } else {
-                java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("^" + java.util.regex.Pattern.quote(name) + "\\[(\\d+)\\].*$");
+                Set<Integer> result = new HashSet<Integer>();
+                Pattern pattern = Pattern.compile("^" + Pattern.quote(name) + "\\[(\\d+)\\].*$");
+
                 for(String key: form.data().keySet()) {
                     java.util.regex.Matcher matcher = pattern.matcher(key);
                     if(matcher.matches()) {
                         result.add(Integer.parseInt(matcher.group(1)));
                     }
                 }
+
+                List<Integer> sortedResult = new ArrayList<Integer>(result);
+                Collections.sort(sortedResult);
+                return sortedResult;
             }
-            return result;
         }
 
         /**

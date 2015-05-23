@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.api.libs.concurrent
 
@@ -16,7 +16,6 @@ import scala.concurrent.{ Future, ExecutionContext, Promise => SPromise }
 import scala.collection.mutable.Builder
 import scala.collection._
 import scala.collection.generic.CanBuildFrom
-import java.util.concurrent.TimeoutException
 import play.core.Execution.internalContext
 import scala.util.Try
 import scala.util.control.NonFatal

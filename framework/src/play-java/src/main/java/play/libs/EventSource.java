@@ -1,10 +1,9 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.libs;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import org.apache.commons.lang3.StringEscapeUtils;
 import play.mvc.Results.*;
 
 /**
@@ -25,50 +24,6 @@ public abstract class EventSource extends Chunks<String> {
     public void onReady(Chunks.Out<String> out) {
         this.out = out;
         onConnected();
-    }
-
-    /**
-     * A single event source can generate different types events by including an event name. On the client, an event listener can be
-     * setup to listen to that particular event.
-     *
-     * @param eventName Unique name of the event.
-     * @param data data associated with event
-     * @deprecated Replaced by send
-     * @see #send(play.libs.EventSource.Event)
-     */
-    @Deprecated
-    public void sendDataByName(String eventName, String data) {
-        out.write("event: " + eventName + "\r\n"
-                + "data: " + StringEscapeUtils.escapeEcmaScript(data) + "\r\n\r\n");
-    }
-
-    /**
-     * Setting an ID lets the browser keep track of the last event fired so that if, the connection to the server is dropped,
-     * a special HTTP header (Last-Event-ID) is set with the new request. This lets the browser determine which event is
-     * appropriate to fire.
-     *
-     * @param eventId Unique event id.
-     * @param data data associated with event
-     * @deprecated Replaced by send
-     * @see #send(play.libs.EventSource.Event)
-     */
-    @Deprecated
-    public void sendDataById(String eventId, String data) {
-        out.write("id: " + eventId + "\r\n"
-                + "data: " + StringEscapeUtils.escapeEcmaScript(data) + "\r\n\r\n");
-
-    }
-
-    /**
-     * Sending a generic event. On the client, 'message' event listener can be setup to listen to this event.
-     *
-     * @param data data associated with event
-     * @deprecated Replaced by send
-     * @see #send(play.libs.EventSource.Event)
-     */
-    @Deprecated
-    public void sendData(String data) {
-        out.write("data: " + StringEscapeUtils.escapeEcmaScript(data) + "\r\n\r\n");
     }
 
     /**
@@ -97,6 +52,45 @@ public abstract class EventSource extends Chunks<String> {
      */
     public void close() {
         out.close();
+    }
+
+    /**
+     * Creates an EventSource. The abstract {@code onConnected} method is
+     * implemented using the specified {@code F.Callback<EventSource>} and
+     * is invoked with {@code EventSource.this}.
+     *
+     * @param callback the callback used to implement onConnected
+     * @return a new EventSource
+     * @throws NullPointerException if the specified callback is null
+     */
+    public static EventSource whenConnected(F.Callback<EventSource> callback) {
+        return new WhenConnectedEventSource(callback);
+    }
+
+    /**
+     * An extension of EventSource that obtains its onConnected from
+     * the specified {@code F.Callback<EventSource>}.
+     */
+    static final class WhenConnectedEventSource extends EventSource {
+
+        private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(WhenConnectedEventSource.class);
+
+        private final F.Callback<EventSource> callback;
+
+        WhenConnectedEventSource(F.Callback<EventSource> callback) {
+            super();
+            if (callback == null) throw new NullPointerException("EventSource onConnected callback cannot be null");
+            this.callback = callback;
+        }
+
+        @Override
+        public void onConnected() {
+            try {
+                callback.invoke(this);
+            } catch (Throwable e) {
+                logger.error("Exception in EventSource.onConnected", e);
+            }
+        }
     }
 
     /**

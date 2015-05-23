@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.filters.csrf
 
@@ -7,34 +7,28 @@ import play.api.mvc._
 import play.api.http.HeaderNames._
 import play.filters.csrf.CSRF._
 import play.api.libs.iteratee._
-import play.api.mvc.Results._
 import play.api.mvc.BodyParsers.parse._
-import play.api.libs.concurrent.Execution.Implicits.defaultContext
 import scala.concurrent.Future
 
 /**
  * An action that provides CSRF protection.
  *
- * @param tokenName The key used to store the token in the Play session.  Defaults to csrfToken.
- * @param cookieName If defined, causes the filter to store the token in a Cookie with this name instead of the session.
- * @param secureCookie If storing the token in a cookie, whether this Cookie should set the secure flag.  Defaults to
- *                     whether the session cookie is configured to be secure.
- * @param createIfNotFound Whether a new CSRF token should be created if it's not found.  Default creates one if it's
- *                         a GET request that accepts HTML.
+ * @param config The CSRF configuration.
  * @param tokenProvider A token provider to use.
  * @param next The composed action that is being protected.
+ * @param errorHandler handling failed token error.
  */
 class CSRFAction(next: EssentialAction,
-    tokenName: String = CSRFConf.TokenName,
-    cookieName: Option[String] = CSRFConf.CookieName,
-    secureCookie: Boolean = CSRFConf.SecureCookie,
-    createIfNotFound: RequestHeader => Boolean = CSRFConf.defaultCreateIfNotFound,
-    tokenProvider: TokenProvider = CSRFConf.defaultTokenProvider) extends EssentialAction {
+    config: CSRFConfig = CSRFConfig(),
+    tokenProvider: TokenProvider = SignedTokenProvider,
+    errorHandler: => ErrorHandler = CSRF.DefaultErrorHandler) extends EssentialAction {
 
   import CSRFAction._
+  import play.api.libs.iteratee.Execution.Implicits.trampoline
 
   // An iteratee that returns a forbidden result saying the CSRF check failed
-  private def checkFailed(msg: String): Iteratee[Array[Byte], SimpleResult] = Done(Forbidden(msg))
+  private def checkFailed(req: RequestHeader, msg: String): Iteratee[Array[Byte], Result] =
+    Iteratee.flatten(clearTokenIfInvalid(req, config, errorHandler, msg) map (Done(_)))
 
   def apply(request: RequestHeader) = {
 
@@ -42,48 +36,50 @@ class CSRFAction(next: EssentialAction,
     def continue = next(request)
 
     // Only filter unsafe methods and content types
-    if (CSRFConf.UnsafeMethods(request.method) && request.contentType.exists(CSRFConf.UnsafeContentTypes)) {
+    if (config.checkMethod(request.method) && config.checkContentType(request.contentType)) {
 
-      if (checkCsrfBypass(request)) {
+      if (checkCsrfBypass(request, config)) {
         continue
       } else {
 
         // Only proceed with checks if there is an incoming token in the header, otherwise there's no point
-        getTokenFromHeader(request, tokenName, cookieName).map { headerToken =>
+        getTokenFromHeader(request, config).map { headerToken =>
 
           // First check if there's a token in the query string or header, if we find one, don't bother handling the body
-          getTokenFromQueryString(request, tokenName).map { queryStringToken =>
+          getTokenFromQueryString(request, config).map { queryStringToken =>
 
             if (tokenProvider.compareTokens(headerToken, queryStringToken)) {
               filterLogger.trace("[CSRF] Valid token found in query string")
               continue
             } else {
               filterLogger.trace("[CSRF] Check failed because invalid token found in query string: " + queryStringToken)
-              checkFailed("Bad CSRF token found in query String")
+              checkFailed(request, "Bad CSRF token found in query String")
             }
 
           } getOrElse {
 
             // Check the body
             request.contentType match {
-              case Some("application/x-www-form-urlencoded") => checkFormBody(request, headerToken, tokenName, next)
-              case Some("multipart/form-data") => checkMultipartBody(request, headerToken, tokenName, next)
-              // No way to extract token from text plain body
-              case Some("text/plain") => {
-                filterLogger.trace("[CSRF] Check failed because text/plain request")
-                checkFailed("No CSRF token found for text/plain body")
-              }
+              case Some("application/x-www-form-urlencoded") => checkFormBody(request, headerToken, config.tokenName, next)
+              case Some("multipart/form-data") => checkMultipartBody(request, headerToken, config.tokenName, next)
+              // No way to extract token from other content types
+              case Some(content) =>
+                filterLogger.trace(s"[CSRF] Check failed because $content request")
+                checkFailed(request, s"No CSRF token found for $content body")
+              case None =>
+                filterLogger.trace(s"[CSRF] Check failed because request without content type")
+                checkFailed(request, s"No CSRF token found for body without content type")
             }
 
           }
         } getOrElse {
 
           filterLogger.trace("[CSRF] Check failed because no token found in headers")
-          checkFailed("No CSRF token found in headers")
+          checkFailed(request, "No CSRF token found in headers")
 
         }
       }
-    } else if (getTokenFromHeader(request, tokenName, cookieName).isEmpty && createIfNotFound(request)) {
+    } else if (getTokenFromHeader(request, config).isEmpty && config.createIfNotFound(request)) {
 
       // No token in header and we have to create one if not found, so create a new token
       val newToken = tokenProvider.generateToken
@@ -93,7 +89,7 @@ class CSRFAction(next: EssentialAction,
 
       // Once done, add it to the result
       next(requestWithNewToken).map(result =>
-        CSRFAction.addTokenToResponse(tokenName, cookieName, secureCookie, newToken, request, result))
+        CSRFAction.addTokenToResponse(config, newToken, request, result))
 
     } else {
       filterLogger.trace("[CSRF] No check necessary")
@@ -109,7 +105,7 @@ class CSRFAction(next: EssentialAction,
   private def checkBody[T](parser: BodyParser[T], extractor: (T => Map[String, Seq[String]]))(request: RequestHeader, tokenFromHeader: String, tokenName: String, next: EssentialAction) = {
     // Take up to 100kb of the body
     val firstPartOfBody: Iteratee[Array[Byte], Array[Byte]] =
-      Traversable.take[Array[Byte]](CSRFConf.PostBodyBuffer.asInstanceOf[Int]) &>> Iteratee.consume[Array[Byte]]()
+      Traversable.take[Array[Byte]](config.postBodyBuffer.asInstanceOf[Int]) &>> Iteratee.consume[Array[Byte]]()
 
     firstPartOfBody.flatMap { bytes: Array[Byte] =>
       // Parse the first 100kb
@@ -132,7 +128,7 @@ class CSRFAction(next: EssentialAction,
           Iteratee.flatten(Enumerator(bytes) |>> next(request))
         } else {
           filterLogger.trace("[CSRF] Check failed because no or invalid token found in body")
-          checkFailed("Invalid token found in form body")
+          checkFailed(request, "Invalid token found in form body")
         }
       })
     }
@@ -142,51 +138,83 @@ class CSRFAction(next: EssentialAction,
 
 object CSRFAction {
 
-  private[csrf] def getTokenFromHeader(request: RequestHeader, tokenName: String, cookieName: Option[String]) = {
-    cookieName.flatMap(cookie => request.cookies.get(cookie).map(_.value))
-      .orElse(request.session.get(tokenName))
+  /**
+   * Get the header token, that is, the token that should be validated.
+   */
+  private[csrf] def getTokenFromHeader(request: RequestHeader, config: CSRFConfig) = {
+    val cookieToken = config.cookieName.flatMap(cookie => request.cookies.get(cookie).map(_.value))
+    val sessionToken = request.session.get(config.tokenName)
+    cookieToken orElse sessionToken
   }
 
-  private[csrf] def getTokenFromQueryString(request: RequestHeader, tokenName: String) = {
-    request.getQueryString(tokenName)
-      .orElse(request.headers.get(CSRFConf.HeaderName))
+  private[csrf] def getTokenFromQueryString(request: RequestHeader, config: CSRFConfig) = {
+    val queryStringToken = request.getQueryString(config.tokenName)
+    val headerToken = request.headers.get(config.headerName)
+
+    queryStringToken orElse headerToken
   }
 
-  private[csrf] def checkCsrfBypass(request: RequestHeader) = {
-    if (request.headers.get(CSRFConf.HeaderName).exists(_ == CSRFConf.HeaderNoCheck)) {
+  private[csrf] def checkCsrfBypass(request: RequestHeader, config: CSRFConfig): Boolean = {
+    if (config.headerBypass) {
+      if (request.headers.get(config.headerName).exists(_ == CSRFConfig.HeaderNoCheck)) {
 
-      // Since injecting arbitrary header values is not possible with a CSRF attack, the presence of this header
-      // indicates that this is not a CSRF attack
-      filterLogger.trace("[CSRF] Bypassing check because " + CSRFConf.HeaderName + ": " + CSRFConf.HeaderNoCheck + " header found")
-      true
+        // Since injecting arbitrary header values is not possible with a CSRF attack, the presence of this header
+        // indicates that this is not a CSRF attack
+        filterLogger.trace("[CSRF] Bypassing check because " + config.headerName + ": " + CSRFConfig.HeaderNoCheck + " header found")
+        true
 
-    } else if (request.headers.get("X-Requested-With").isDefined) {
+      } else if (request.headers.get("X-Requested-With").isDefined) {
 
-      // AJAX requests are not CSRF attacks either because they are restricted to same origin policy
-      filterLogger.trace("[CSRF] Bypassing check because X-Requested-With header found")
-      true
+        // AJAX requests are not CSRF attacks either because they are restricted to same origin policy
+        filterLogger.trace("[CSRF] Bypassing check because X-Requested-With header found")
+        true
+      } else {
+        false
+      }
     } else {
       false
     }
   }
 
-  private[csrf] def addTokenToResponse(tokenName: String, cookieName: Option[String], secureCookie: Boolean,
-    newToken: String, request: RequestHeader, result: SimpleResult) = {
-    filterLogger.trace("[CSRF] Adding token to result: " + result)
+  private[csrf] def addTokenToResponse(config: CSRFConfig, newToken: String, request: RequestHeader, result: Result) = {
 
-    cookieName.map {
-      // cookie
-      name =>
-        result.withCookies(Cookie(name, newToken, path = Session.path, domain = Session.domain,
-          secure = secureCookie))
-    } getOrElse {
-      // Get the new session, or the incoming session
-      val session = Cookies(result.header.headers.get(SET_COOKIE))
-        .get(Session.COOKIE_NAME).map(_.value).map(Session.decode)
-        .getOrElse(request.session.data)
+    if (isCached(result)) {
+      filterLogger.trace("[CSRF] Not adding token to cached response")
+      result
+    } else {
+      filterLogger.trace("[CSRF] Adding token to result: " + result)
 
-      val newSession = session + (tokenName -> newToken)
-      result.withSession(Session.deserialize(newSession))
+      config.cookieName.map {
+        // cookie
+        name =>
+          result.withCookies(Cookie(name, newToken, path = Session.path, domain = Session.domain,
+            secure = config.secureCookie, httpOnly = config.httpOnlyCookie))
+      } getOrElse {
+
+        val newSession = result.session(request) + (config.tokenName -> newToken)
+        result.withSession(newSession)
+      }
+    }
+
+  }
+
+  private[csrf] def isCached(result: Result): Boolean =
+    result.header.headers.get(CACHE_CONTROL).fold(false)(!_.contains("no-cache"))
+
+  private[csrf] def clearTokenIfInvalid(request: RequestHeader, config: CSRFConfig, errorHandler: ErrorHandler, msg: String): Future[Result] = {
+    import play.api.libs.iteratee.Execution.Implicits.trampoline
+
+    errorHandler.handle(request, msg) map { result =>
+      CSRF.getToken(request).fold(
+        config.cookieName.flatMap { cookie =>
+          request.cookies.get(cookie).map { token =>
+            result.discardingCookies(DiscardingCookie(cookie, domain = Session.domain, path = Session.path,
+              secure = config.secureCookie))
+          }
+        }.getOrElse {
+          result.withSession(result.session(request) - config.tokenName)
+        }
+      )(_ => result)
     }
   }
 }
@@ -198,19 +226,19 @@ object CSRFAction {
  */
 object CSRFCheck {
 
-  private class CSRFCheckAction[A](tokenName: String, cookieName: Option[String], tokenProvider: TokenProvider,
+  private class CSRFCheckAction[A](config: CSRFConfig, tokenProvider: TokenProvider, errorHandler: ErrorHandler,
       wrapped: Action[A]) extends Action[A] {
     def parser = wrapped.parser
     def apply(request: Request[A]) = {
 
       // Maybe bypass
-      if (CSRFAction.checkCsrfBypass(request) || !request.contentType.exists(CSRFConf.UnsafeContentTypes)) {
+      if (CSRFAction.checkCsrfBypass(request, config) || !config.checkContentType(request.contentType)) {
         wrapped(request)
       } else {
         // Get token from header
-        CSRFAction.getTokenFromHeader(request, tokenName, cookieName).flatMap { headerToken =>
+        CSRFAction.getTokenFromHeader(request, config).flatMap { headerToken =>
           // Get token from query string
-          CSRFAction.getTokenFromQueryString(request, tokenName)
+          CSRFAction.getTokenFromQueryString(request, config)
             // Or from body if not found
             .orElse({
               val form = request.body match {
@@ -220,13 +248,15 @@ object CSRFCheck {
                 case body: play.api.mvc.MultipartFormData[_] => body.asFormUrlEncoded
                 case _ => Map.empty[String, Seq[String]]
               }
-              form.get(tokenName).flatMap(_.headOption)
+              form.get(config.tokenName).flatMap(_.headOption)
             })
             // Execute if it matches
             .collect {
               case queryToken if tokenProvider.compareTokens(queryToken, headerToken) => wrapped(request)
             }
-        }.getOrElse(Future.successful(Forbidden("CSRF token check failed")))
+        }.getOrElse {
+          CSRFAction.clearTokenIfInvalid(request, config, errorHandler, "CSRF token check failed")
+        }
       }
     }
   }
@@ -234,8 +264,8 @@ object CSRFCheck {
   /**
    * Wrap an action in a CSRF check.
    */
-  def apply[A](action: Action[A]): Action[A] =
-    new CSRFCheckAction(CSRFConf.TokenName, CSRFConf.CookieName, CSRFConf.defaultTokenProvider, action)
+  def apply[A](action: Action[A], errorHandler: ErrorHandler = CSRF.DefaultErrorHandler, config: CSRFConfig = CSRFConfig.global): Action[A] =
+    new CSRFCheckAction(config, new TokenProviderProvider(config).get, errorHandler, action)
 }
 
 /**
@@ -245,11 +275,10 @@ object CSRFCheck {
  */
 object CSRFAddToken {
 
-  private class CSRFAddTokenAction[A](tokenName: String, cookieName: Option[String], secureCookie: Boolean,
-      tokenProvider: TokenProvider, wrapped: Action[A]) extends Action[A] {
+  private class CSRFAddTokenAction[A](config: CSRFConfig, tokenProvider: TokenProvider, wrapped: Action[A]) extends Action[A] {
     def parser = wrapped.parser
     def apply(request: Request[A]) = {
-      if (CSRFAction.getTokenFromHeader(request, tokenName, cookieName).isEmpty) {
+      if (CSRFAction.getTokenFromHeader(request, config).isEmpty) {
         // No token in header and we have to create one if not found, so create a new token
         val newToken = tokenProvider.generateToken
 
@@ -259,8 +288,9 @@ object CSRFAddToken {
         }
 
         // Once done, add it to the result
+        import play.api.libs.iteratee.Execution.Implicits.trampoline
         wrapped(requestWithNewToken).map(result =>
-          CSRFAction.addTokenToResponse(tokenName, cookieName, secureCookie, newToken, request, result))
+          CSRFAction.addTokenToResponse(config, newToken, request, result))
       } else {
         wrapped(request)
       }
@@ -270,7 +300,6 @@ object CSRFAddToken {
   /**
    * Wrap an action in an action that ensures there is a CSRF token.
    */
-  def apply[A](action: Action[A]): Action[A] =
-    new CSRFAddTokenAction(CSRFConf.TokenName, CSRFConf.CookieName, CSRFConf.SecureCookie,
-      CSRFConf.defaultTokenProvider, action)
+  def apply[A](action: Action[A], config: CSRFConfig = CSRFConfig.global): Action[A] =
+    new CSRFAddTokenAction(config, new TokenProviderProvider(config).get, action)
 }

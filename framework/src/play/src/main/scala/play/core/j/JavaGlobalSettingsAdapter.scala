@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.core.j
 
@@ -15,46 +15,35 @@ class JavaGlobalSettingsAdapter(val underlying: play.GlobalSettings) extends Glo
   require(underlying != null, "underlying cannot be null")
 
   override def beforeStart(app: Application) {
-    underlying.beforeStart(new play.Application(app))
+    underlying.beforeStart(app.injector.instanceOf[play.Application])
   }
 
   override def onStart(app: Application) {
-    underlying.onStart(new play.Application(app))
+    underlying.onStart(app.injector.instanceOf[play.Application])
   }
 
   override def onStop(app: Application) {
-    underlying.onStop(new play.Application(app))
+    underlying.onStop(app.injector.instanceOf[play.Application])
   }
 
   override def onRouteRequest(request: RequestHeader): Option[Handler] = {
-    val r = JavaHelpers.createJavaRequest(request)
+    val r = new play.mvc.Http.RequestImpl(request)
     Option(underlying.onRouteRequest(r)).map(Some(_)).getOrElse(super.onRouteRequest(request))
   }
 
-  override def onError(request: RequestHeader, ex: Throwable): Future[SimpleResult] = {
-    JavaHelpers.invokeWithContext(request, req => Option(underlying.onError(req, ex)))
+  override def onError(request: RequestHeader, ex: Throwable): Future[Result] = {
+    JavaHelpers.invokeWithContextOpt(request, req => underlying.onError(req, ex))
       .getOrElse(super.onError(request, ex))
   }
 
-  override def onHandlerNotFound(request: RequestHeader): Future[SimpleResult] = {
-    JavaHelpers.invokeWithContext(request, req => Option(underlying.onHandlerNotFound(req)))
+  override def onHandlerNotFound(request: RequestHeader): Future[Result] = {
+    JavaHelpers.invokeWithContextOpt(request, req => underlying.onHandlerNotFound(req))
       .getOrElse(super.onHandlerNotFound(request))
   }
 
-  override def onBadRequest(request: RequestHeader, error: String): Future[SimpleResult] = {
-    JavaHelpers.invokeWithContext(request, req => Option(underlying.onBadRequest(req, error)))
+  override def onBadRequest(request: RequestHeader, error: String): Future[Result] = {
+    JavaHelpers.invokeWithContextOpt(request, req => underlying.onBadRequest(req, error))
       .getOrElse(super.onBadRequest(request, error))
-  }
-
-  override def getControllerInstance[A](controllerClass: Class[A]): A = {
-    Option(underlying.getControllerInstance(controllerClass))
-      .getOrElse(super.getControllerInstance(controllerClass))
-  }
-
-  override def onLoadConfig(config: Configuration, path: File, classloader: ClassLoader, mode: Mode.Mode) = {
-    import JavaModeConverter.asJavaMode
-    Option(underlying.onLoadConfig(new play.Configuration(config), path, classloader, mode))
-      .map(_.getWrappedConfiguration).getOrElse(super.onLoadConfig(config, path, classloader, mode))
   }
 
   override def doFilter(a: EssentialAction): EssentialAction = {

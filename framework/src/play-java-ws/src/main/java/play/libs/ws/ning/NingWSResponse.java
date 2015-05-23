@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 
 package play.libs.ws.ning;
@@ -16,8 +16,11 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.MalformedURLException;
 import java.net.URI;
+import java.net.URISyntaxException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * A WS response.
@@ -52,6 +55,14 @@ public class NingWSResponse implements WSResponse {
     }
 
     /**
+     * Get all the HTTP headers of the response as a case-insensitive map
+     */
+    @Override
+    public Map<String, List<String>> getAllHeaders() {
+        return ahcResponse.getHeaders();
+    }
+
+    /**
      * Get the given HTTP header of the response
      */
     @Override
@@ -65,7 +76,7 @@ public class NingWSResponse implements WSResponse {
     @Override
     public List<WSCookie> getCookies() {
         List<WSCookie> cookieList = new ArrayList<WSCookie>();
-        for (com.ning.http.client.Cookie ahcCookie : ahcResponse.getCookies()) {
+        for (com.ning.http.client.cookie.Cookie ahcCookie : ahcResponse.getCookies()) {
             cookieList.add(new NingWSCookie(ahcCookie));
         }
         return cookieList;
@@ -76,7 +87,7 @@ public class NingWSResponse implements WSResponse {
      */
     @Override
     public WSCookie getCookie(String name) {
-        for (com.ning.http.client.Cookie ahcCookie : ahcResponse.getCookies()) {
+        for (com.ning.http.client.cookie.Cookie ahcCookie : ahcResponse.getCookies()) {
             // safe -- cookie.getName() will never return null
             if (ahcCookie.getName().equals(name)) {
                 return new NingWSCookie(ahcCookie);
@@ -105,7 +116,7 @@ public class NingWSResponse implements WSResponse {
             if (charset != null) {
                 return ahcResponse.getResponseBody(charset);
             } else if (contentType.startsWith("text/")) {
-                return ahcResponse.getResponseBody(AsyncHttpProviderUtils.DEFAULT_CHARSET);
+                return ahcResponse.getResponseBody(AsyncHttpProviderUtils.DEFAULT_CHARSET.toString());
             } else {
                 return ahcResponse.getResponseBody("utf-8");
             }
@@ -176,8 +187,8 @@ public class NingWSResponse implements WSResponse {
     @Override
     public URI getUri() {
         try {
-            return ahcResponse.getUri();
-        } catch (MalformedURLException e) {
+            return ahcResponse.getUri().toJavaNetURI();
+        } catch (URISyntaxException e) {
             throw new RuntimeException(e);
         }
     }

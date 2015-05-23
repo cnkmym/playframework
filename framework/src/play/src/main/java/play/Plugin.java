@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play;
 
@@ -19,7 +19,10 @@ package play;
  *     }
  * }
  * </pre>
+ *
+ * @deprecated Use modules instead
  */
+@Deprecated
 public class Plugin implements play.api.Plugin {
     
     /**

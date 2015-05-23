@@ -1,11 +1,11 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.data.models
 
 import java.util.Date
-import reflect.BeanProperty
-import annotation.target.field
+import scala.beans.BeanProperty
+import scala.annotation.meta.field
 
 class Task {
 

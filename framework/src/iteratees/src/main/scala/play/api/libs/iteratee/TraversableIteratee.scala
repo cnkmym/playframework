@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.api.libs.iteratee
 
@@ -31,19 +31,20 @@ object Traversable {
     }
   }
 
-  def takeUpTo[M](count: Int)(implicit p: M => scala.collection.TraversableLike[_, M]): Enumeratee[M, M] = new Enumeratee[M, M] {
+  def takeUpTo[M](count: Long)(implicit p: M => scala.collection.TraversableLike[_, M]): Enumeratee[M, M] = new Enumeratee[M, M] {
 
     def applyOn[A](it: Iteratee[M, A]): Iteratee[M, Iteratee[M, A]] = {
 
-      def step(inner: Iteratee[M, A], leftToTake: Int)(in: Input[M]): Iteratee[M, Iteratee[M, A]] = {
+      def step(inner: Iteratee[M, A], leftToTake: Long)(in: Input[M]): Iteratee[M, Iteratee[M, A]] = {
         in match {
           case in @ Input.El(e) =>
             inner.pureFlatFold {
-              case Step.Cont(k) => e.splitAt(leftToTake) match {
-                case (all, x) if x.isEmpty => Cont(step(k(Input.El(all)), (leftToTake - all.size)))
+              case Step.Cont(k) if leftToTake < Int.MaxValue => e.splitAt(leftToTake.toInt) match {
+                case (all, x) if x.isEmpty => Cont(step(k(Input.El(all)), leftToTake - all.size))
                 case (x, left) if x.isEmpty => Done(inner, Input.El(left))
                 case (toPush, left) => Done(k(Input.El(toPush)), Input.El(left))
               }
+              case Step.Cont(k) => Cont(step(k(Input.El(e)), leftToTake - e.size))
               case _ => Done(inner, in)
             }
 
@@ -105,8 +106,8 @@ object Traversable {
           case (prefix, suffix) => Done(if (prefix.isEmpty) Cont(k) else k(Input.El(prefix)), Input.El(suffix.drop(1)))
         }(dec))
 
-      case in @ Input.Empty =>
-        new CheckDone[M, M] { def continue[A](k: K[M, A]) = Cont(step(k)) } &> k(in)
+      case Input.Empty =>
+        new CheckDone[M, M] { def continue[A](k: K[M, A]) = Cont(step(k)) } &> k(Input.Empty)
 
       case Input.EOF => Done(Cont(k), Input.EOF)
 

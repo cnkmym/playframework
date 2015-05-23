@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.api.libs.iteratee
 
@@ -17,7 +17,7 @@ import play.api.libs.iteratee.Execution.Implicits.{ defaultExecutionContext => d
  */
 object Concurrent {
 
-  private val timer = new java.util.Timer()
+  private val timer = new java.util.Timer(true)
 
   private def timeoutFuture[A](v: A, delay: Long, unit: TimeUnit): Future[A] = {
 
@@ -53,6 +53,11 @@ object Concurrent {
      * Send a failure to this channel.  This results in any promises that the enumerator associated with this channel
      * produced being redeemed with a failure.
      *
+     * Calling this multiple times is ok.  In the case of a broadcast enumerator, any iteratees that are attached
+     * after one of the end methods on this channel are invoked will be redeemed according to the most recent
+     * invocation, that is, subsequent calls to end will change the behaviour of attaching new iteratees to the
+     * broadcast enumerator.
+     *
      * @param e The failure.
      */
     def end(e: Throwable)
@@ -63,6 +68,11 @@ object Concurrent {
      *
      * Note that an EOF won't be sent, so any iteratees consuming this channel will still be able to consume input
      * (if they are in the cont state).
+     *
+     * Calling this multiple times is ok.  In the case of a broadcast enumerator, any iteratees that are attached
+     * after one of the end methods on this channel are invoked will be redeemed according to the most recent
+     * invocation, that is, subsequent calls to end will change the behaviour of attaching new iteratees to the
+     * broadcast enumerator.
      */
     def end()
 
@@ -165,7 +175,10 @@ object Concurrent {
 
     val toPush = new Channel[E] {
 
-      def push(chunk: Input[E]) {
+      private val runQueue = new RunQueue()
+      private def schedule(body: => Unit) = runQueue.scheduleSimple(body)(dec)
+
+      def push(chunk: Input[E]) = schedule {
 
         val itPromise = Promise[Iteratee[E, Unit]]()
 
@@ -190,7 +203,7 @@ object Concurrent {
         }(dec)
       }
 
-      def end(e: Throwable) {
+      def end(e: Throwable) = schedule {
         val current: Iteratee[E, Unit] = mainIteratee.single.swap(Done((), Input.Empty))
         def endEveryone() = Future {
           val its = atomic { implicit txn =>
@@ -203,7 +216,7 @@ object Concurrent {
         current.fold { case _ => endEveryone() }(dec)
       }
 
-      def end() {
+      def end() = schedule {
         val current: Iteratee[E, Unit] = mainIteratee.single.swap(Done((), Input.Empty))
         def endEveryone() = Future {
           val its = atomic { implicit txn =>
@@ -292,9 +305,9 @@ object Concurrent {
       val state: Ref[State] = Ref(Queueing(Queue[Input[E]](), 0))
 
       def step: K[E, Iteratee[E, A]] = {
-        case in @ Input.EOF =>
+        case Input.EOF =>
           state.single.getAndTransform {
-            case Queueing(q, l) => Queueing(q.enqueue(in), l)
+            case Queueing(q, l) => Queueing(q.enqueue(Input.EOF), l)
 
             case Waiting(p) => Queueing(Queue(), 0)
 
@@ -302,7 +315,7 @@ object Concurrent {
 
           } match {
             case Waiting(p) =>
-              p.success(in)
+              p.success(Input.EOF)
             case _ =>
 
           }
@@ -432,7 +445,7 @@ object Concurrent {
     onStart: Channel[E] => Unit,
     onComplete: => Unit = (),
     onError: (String, Input[E]) => Unit = (_: String, _: Input[E]) => ())(implicit ec: ExecutionContext) = new Enumerator[E] {
-    val pec = ec.prepare()
+    implicit val pec = ec.prepare()
 
     import scala.concurrent.stm.Ref
 
@@ -441,7 +454,11 @@ object Concurrent {
       val iteratee: Ref[Future[Option[Input[E] => Iteratee[E, A]]]] = Ref(it.pureFold { case Step.Cont(k) => Some(k); case other => promise.success(other.it); None }(dec))
 
       val pushee = new Channel[E] {
-        def close() {
+
+        private val runQueue = new RunQueue()
+        private def schedule(body: => Unit) = runQueue.scheduleSimple(body)(dec)
+
+        def close() = schedule {
           iteratee.single.swap(Future.successful(None)).onComplete {
             case Success(maybeK) => maybeK.foreach { k =>
               promise.success(k(Input.EOF))
@@ -450,7 +467,7 @@ object Concurrent {
           }(dec)
         }
 
-        def end(e: Throwable) {
+        def end(e: Throwable) = schedule {
           iteratee.single.swap(Future.successful(None)).onComplete {
             case Success(maybeK) =>
               maybeK.foreach(_ => promise.failure(e))
@@ -458,13 +475,13 @@ object Concurrent {
           }(dec)
         }
 
-        def end() {
+        def end() = schedule {
           iteratee.single.swap(Future.successful(None)).onComplete { maybeK =>
             maybeK.get.foreach(k => promise.success(Cont(k)))
           }(dec)
         }
 
-        def push(item: Input[E]) {
+        def push(item: Input[E]) = schedule {
           val eventuallyNext = Promise[Option[Input[E] => Iteratee[E, A]]]()
           iteratee.single.swap(eventuallyNext.future).onComplete {
             case Success(None) => eventuallyNext.success(None)
@@ -537,14 +554,12 @@ object Concurrent {
 
   }
 
-  @scala.deprecated("use Concurrent.broadcast instead", "2.1.0")
   private trait Hub[E] extends Broadcaster {
 
     def getPatchCord(): Enumerator[E]
 
   }
 
-  @scala.deprecated("use Concurrent.broadcast instead", "2.1.0")
   private def hub[E](e: Enumerator[E], interestIsDownToZero: () => Unit = () => ())(implicit ec: ExecutionContext): Hub[E] = {
     val pec = ec.prepare()
 

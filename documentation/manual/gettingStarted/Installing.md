@@ -1,50 +1,73 @@
-<!--- Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com> -->
+<!--- Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com> -->
 # Installing Play
 
 ## Prerequisites
 
-To run the Play framework, you need [JDK 6 or later](http://www.oracle.com/technetwork/java/javase/downloads/index.html). 
+You need to have a JDK 1.8 (or later) installed on your machine (see [General Installation Tasks](#JDK-installation)).
 
-> If you are using MacOS, Java is built-in. If you are using Linux, make sure to use either the Sun JDK or OpenJDK (and not gcj, which is the default Java command on many Linux distros). If you are using Windows, just download and install the latest JDK package.
+## Quick Start
 
-> Note, Java 7 pre update 9 on MacOS has a bug that causes problems with futures and iteratees, including making large file uploads hang.  If using Java 7 on MacOS, make sure you are using the latest version.
+1. **Download** the latest [Typesafe Activator](https://typesafe.com/get-started).
+2. **Extract** the archive on a location where you have write access.
+3. **Change** dir with cmd `cd activator*` (or with the file-manager)
+4. **Start** it with cmd `activator ui` (or with the file-manager)
+5. **Access** it at [http://localhost:8888](http://localhost:8888)
 
-Be sure to have the `java` and `javac` commands in the current path (you can check this by typing `java -version` and `javac -version` at the shell prompt). 
+You'll find documentation and a list of application samples which get you going immediately. For a simple start, try the **play-java** sample.
 
-## Download the binary package
 
-### Using Typesafe Activator
+### Command Line
 
-Play can be installed using [Typesafe Activator](http://typesafe.com/activator).  The documentation on this page is about installing the Play standalone distribution.  If you would like to use Typesafe Activator, then follow the instructions [here](http://typesafe.com/platform/getstarted) to install Play.
+To use play from any location on your file-system, add the **activator** directory to your path (see [General Installation Tasks](#Add-Executables-to-Path)).
 
-### Using Play standalone
-
-Download the latest [Play standalone distribution](http://www.playframework.com/download) and extract the archive to a location where you have both read **and write** access. (Running `play` writes some files to directories within the archive, so don't install to `/opt`, `/usr/local` or anywhere else you’d need special permission to write to.)
-
-## Add the play script to your PATH
-
-For convenience, you should add the framework installation directory to your system PATH. On UNIX systems, this means doing something like:
+Creating `my-first-app` based on the `play-java` template is as simple as:
 
 ```bash
-export PATH=$PATH:/relativePath/to/play
+activator new my-first-app play-java
+cd my-first-app
+activator run
 ```
 
-On Windows you’ll need to set it in the global environment variables. This means update the PATH in the environment variables and don't use a path with spaces.
+[http://localhost:9000](http://localhost:9000) - access your application here.
 
-> If you’re on UNIX, make sure that the `play` script is executable (otherwise do a `chmod a+x play`).
+You are now ready to work with Play!
 
-> If you're behind a proxy make sure to define it with `set HTTP_PROXY=http://<host>:<port>` on Windows or `export  HTTP_PROXY=http://<host>:<port>` on UNIX.
+## General Installation Tasks
 
-## Check that the play command is available
+You may need to deal with those general tasks in order to install Play! on your system. 
 
-From a shell, launch the `play help` command. 
+### JDK installation
+
+Verify if you have a JDK (Java Development Kit) Version 1.8 or later on your machine. Simply use those commands to verify:
 
 ```bash
-$ play help
+java -version
+javac -version
 ```
 
-If everything is properly installed, you should see the basic help:
+If you don't have the JDK, you have to install it:
 
-[[images/play.png]]
+1. **MacOS**, Java is built-in, but you may have to [Update to the latest](http://www.oracle.com/technetwork/java/javase/downloads/index.html)
+2. **Linux**, use either the latest Oracle JDK or OpenJDK (do not use not gcj). 
+3. **Windows** just download and install the [latest JDK](http://www.oracle.com/technetwork/java/javase/downloads/index.html) package.
 
-> **Next:** [[Creating a new application | NewApplication]]
+
+### Add Executables to Path
+
+For convenience, you should add the Activator installation directory to your system `PATH`.
+
+On **Unix**, use `export PATH=/path/to/activator:$PATH`
+
+On **Windows**, add `;C:\path\to\activator` to your `PATH` environment variable. Do not use a path with spaces.
+
+### File Permissions
+
+#### Unix
+
+Running `activator` writes some files to directories within the distribution, so don't install to `/opt`, `/usr/local` or anywhere else you’d need special permission to write to.
+
+Make sure that the `activator` script is executable. If it's not, do a `chmod u+x /path/to/activator`.
+
+### Proxy Setup
+
+If you're behind a proxy make sure to define it with `set HTTP_PROXY=http://<host>:<port>` on Windows or `export  HTTP_PROXY=http://<host>:<port>` on UNIX.

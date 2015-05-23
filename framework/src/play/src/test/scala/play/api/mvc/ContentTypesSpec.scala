@@ -1,30 +1,12 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.api.mvc
 
 import org.specs2.mutable.Specification
-import scalax.io.Resource
+import play.utils.PlayIO
 
 object ContentTypesSpec extends Specification {
-
-  import play.api.mvc.BodyParsers.parse.Multipart._
-
-  "FileInfoMatcher" should {
-
-    "parse headers with semicolon inside quotes" in {
-      val result = FileInfoMatcher.unapply(Map("content-disposition" -> """form-data; name="document"; filename="semicolon;inside.jpg"""", "content-type" -> "image/jpeg"))
-      result must not beEmpty;
-      result.get must equalTo(("document", "semicolon;inside.jpg", Option("image/jpeg")));
-    }
-    
-    "parse headers with escaped quote inside quotes" in {
-      val result = FileInfoMatcher.unapply(Map("content-disposition" -> """form-data; name="document"; filename="quotes\"\".jpg"""", "content-type" -> "image/jpeg"))
-      result must not beEmpty;
-      result.get must equalTo(("document", """quotes"".jpg""", Option("image/jpeg")));
-    }
-
-  }
 
   "RawBuffer" should {
     implicit def stringToBytes(s: String): Array[Byte] = s.getBytes("utf-8")
@@ -90,7 +72,7 @@ object ContentTypesSpec extends Specification {
       buffer.push("world")
       buffer.size must_== 11
       val file = buffer.asFile
-      Resource.fromFile(file).string must_== "hello world"
+      PlayIO.readFileAsString(file) must_== "hello world"
     }
   }
 }

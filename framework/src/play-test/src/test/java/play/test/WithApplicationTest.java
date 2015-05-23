@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.test;
 
@@ -14,14 +14,12 @@ public class WithApplicationTest extends WithApplication {
 
     @Test
     public void withApplicationShouldProvideAnApplication() {
-        start();
         assertNotNull(app);
         assertNotNull(Play.application());
     }
 
     @Test
     public void withApplicationShouldCleanUpApplication() {
-        start();
         stopPlay();
         assertNull(app);
         assertTrue(play.api.Play.maybeApplication().isEmpty());

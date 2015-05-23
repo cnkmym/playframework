@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.core.j
 
@@ -12,21 +12,20 @@ import scala.collection.JavaConverters._
 import scala.concurrent.ExecutionContext
 
 object HttpExecutionContextSpec extends Specification
-  with ExecutionSpecification {
+    with ExecutionSpecification {
 
   "HttpExecutionContext" should {
 
     "propagate the context ClassLoader and Http.Context" in {
       mustExecute(2) { ec =>
-        val pec = ec.prepare()
         val classLoader = new ClassLoader() {}
         val httpContext = new Http.Context(1, null, null, Map.empty.asJava, Map.empty.asJava, Map.empty.asJava)
-        val hec = new HttpExecutionContext(classLoader, httpContext, pec)
+        val hec = new HttpExecutionContext(classLoader, httpContext, ec).prepare
 
         val hecFromThread = new LinkedBlockingQueue[ExecutionContext]()
         hec.execute(new Runnable {
           def run() = {
-            hecFromThread.offer(HttpExecutionContext.fromThread(pec))
+            hecFromThread.offer(HttpExecutionContext.fromThread(ec).prepare)
           }
         })
 
@@ -42,7 +41,6 @@ object HttpExecutionContextSpec extends Specification
         actualHttpContext.poll(5, SECONDS) must equalTo(httpContext)
       }
     }
-
   }
 
 }

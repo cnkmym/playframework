@@ -1,21 +1,27 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.core.j
 
-import play.api.mvc._
-import play.api.libs.json._
-import play.api.libs.Files.{ TemporaryFile }
+import play.core.parsers.Multipart
 
-import scala.xml._
 import scala.collection.JavaConverters._
+import scala.xml._
+
+import com.fasterxml.jackson.databind.JsonNode
+
+import play.api.libs.Files.TemporaryFile
+import play.api.libs.iteratee.Execution.trampoline
+import play.api.libs.json.Reads.JsonNodeReads
+import play.api.libs.json._
+import play.api.mvc._
 
 /**
  * provides Java centric BodyParsers
  */
 object JavaParsers extends BodyParsers {
 
-  import play.mvc.Http.{ RequestBody }
+  import play.mvc.Http.RequestBody
 
   case class DefaultRequestBody(
       urlFormEncoded: Option[Map[String, Seq[String]]] = None,
@@ -23,8 +29,7 @@ object JavaParsers extends BodyParsers {
       text: Option[String] = None,
       json: Option[JsValue] = None,
       xml: Option[NodeSeq] = None,
-      multipart: Option[MultipartFormData[TemporaryFile]] = None,
-      override val isMaxSizeExceeded: Boolean = false) extends RequestBody {
+      multipart: Option[MultipartFormData[TemporaryFile]] = None) extends RequestBody {
 
     override lazy val asFormUrlEncoded = {
       urlFormEncoded.map(_.mapValues(_.toArray).asJava).orNull
@@ -42,131 +47,97 @@ object JavaParsers extends BodyParsers {
       }.orNull
     }
 
-    override def asText = {
-      text.orNull
-    }
+    override def asText = text.orNull
 
-    override lazy val asJson = {
-      json.map { json =>
-        play.libs.Json.parse(json.toString)
-      }.orNull
-    }
+    override lazy val asJson = json.map(Json.fromJson[JsonNode](_).get).orNull
 
-    override lazy val asXml = {
-      xml.map { xml =>
-        play.libs.XML.fromString(xml.toString)
-      }.orNull
-    }
+    override lazy val asXml = xml.map { xml =>
+      play.libs.XML.fromString(xml.toString)
+    }.orNull
 
-    override lazy val asMultipartFormData = {
-      multipart.map { multipart =>
+    override lazy val asMultipartFormData = multipart.map { multipart =>
+      new play.mvc.Http.MultipartFormData {
 
-        new play.mvc.Http.MultipartFormData {
-
-          lazy val asFormUrlEncoded = {
-            multipart.asFormUrlEncoded.mapValues(_.toArray).asJava
-          }
-
-          lazy val getFiles = {
-            multipart.files.map { file =>
-              new play.mvc.Http.MultipartFormData.FilePart(
-                file.key, file.filename, file.contentType.orNull, file.ref.file)
-            }.asJava
-          }
-
+        lazy val asFormUrlEncoded = {
+          multipart.asFormUrlEncoded.mapValues(_.toArray).asJava
         }
 
-      }.orNull
-    }
-
+        lazy val getFiles = {
+          multipart.files.map { file =>
+            new play.mvc.Http.MultipartFormData.FilePart(
+              file.key, file.filename, file.contentType.orNull, file.ref.file)
+          }.asJava
+        }
+      }
+    }.orNull
   }
 
-  def anyContent(maxLength: Int): BodyParser[RequestBody] = parse.maxLength(orDefault(maxLength), parse.anyContent).map {
-    _.fold(
-      _ => DefaultRequestBody(isMaxSizeExceeded = true),
-      anyContent =>
-        DefaultRequestBody(
-          anyContent.asFormUrlEncoded,
-          anyContent.asRaw,
-          anyContent.asText,
-          anyContent.asJson,
-          anyContent.asXml,
-          anyContent.asMultipartFormData)
-    )
+  def default_(maxLength: Long): BodyParser[RequestBody] = anyContent(parse.default(Some(maxLength).filter(_ >= 0)))
+
+  def anyContent(maxLength: Long): BodyParser[RequestBody] = anyContent(parse.anyContent(Some(maxLength).filter(_ >= 0)))
+
+  private def anyContent(parser: BodyParser[AnyContent]): BodyParser[RequestBody] =
+    parser.map { anyContent =>
+      DefaultRequestBody(
+        anyContent.asFormUrlEncoded,
+        anyContent.asRaw,
+        anyContent.asText,
+        anyContent.asJson,
+        anyContent.asXml,
+        anyContent.asMultipartFormData)
+    }(trampoline)
+
+  def json(maxLength: Long): BodyParser[RequestBody] =
+    parse.json(orDefault(maxLength)).map { json =>
+      DefaultRequestBody(json = Some(json))
+    }(trampoline)
+
+  def tolerantJson(maxLength: Long): BodyParser[RequestBody] =
+    parse.tolerantJson(orDefault(maxLength)).map { json =>
+      DefaultRequestBody(json = Some(json))
+    }(trampoline)
+
+  def xml(maxLength: Long): BodyParser[RequestBody] =
+    parse.xml(orDefault(maxLength)).map { xml =>
+      DefaultRequestBody(xml = Some(xml))
+    }(trampoline)
+
+  def tolerantXml(maxLength: Long): BodyParser[RequestBody] =
+    parse.tolerantXml(orDefault(maxLength)).map { xml =>
+      DefaultRequestBody(xml = Some(xml))
+    }(trampoline)
+
+  def text(maxLength: Long): BodyParser[RequestBody] =
+    parse.text(orDefault(maxLength)).map { text =>
+      DefaultRequestBody(text = Some(text))
+    }(trampoline)
+
+  def tolerantText(maxLength: Long): BodyParser[RequestBody] =
+    parse.tolerantText(orDefault(maxLength)).map { text =>
+      DefaultRequestBody(text = Some(text))
+    }(trampoline)
+
+  def formUrlEncoded(maxLength: Long): BodyParser[RequestBody] =
+    parse.urlFormEncoded(orDefault(maxLength)).map { urlFormEncoded =>
+      DefaultRequestBody(urlFormEncoded = Some(urlFormEncoded))
+    }(trampoline)
+
+  def multipartFormData(maxLength: Long): BodyParser[RequestBody] = {
+    val maxLengthOrDefault = if (maxLength < 0) BodyParsers.parse.DefaultMaxDiskLength else maxLength
+    parse.multipartFormData(Multipart.handleFilePartAsTemporaryFile, maxLengthOrDefault).map { multipart =>
+      DefaultRequestBody(multipart = Some(multipart))
+    }(trampoline)
   }
 
-  def json(maxLength: Int): BodyParser[RequestBody] = parse.maxLength(orDefault(maxLength), parse.json(Integer.MAX_VALUE)).map {
-    _.fold(
-      _ => DefaultRequestBody(isMaxSizeExceeded = true),
-      json =>
-        DefaultRequestBody(json = Some(json))
-    )
-  }
+  def raw(maxLength: Long): BodyParser[RequestBody] =
+    parse.raw(parse.DefaultMaxTextLength, orDefault(maxLength)).map { raw =>
+      DefaultRequestBody(raw = Some(raw))
+    }(trampoline)
 
-  def tolerantJson(maxLength: Int): BodyParser[RequestBody] = parse.maxLength(orDefault(maxLength), parse.tolerantJson(Integer.MAX_VALUE)).map {
-    _.fold(
-      _ => DefaultRequestBody(isMaxSizeExceeded = true),
-      json =>
-        DefaultRequestBody(json = Some(json))
-    )
-  }
+  def empty(): BodyParser[RequestBody] = parse.empty.map {
+    (_: Unit) => new RequestBody()
+  }(trampoline)
 
-  def xml(maxLength: Int): BodyParser[RequestBody] = parse.maxLength(orDefault(maxLength), parse.xml(Integer.MAX_VALUE)).map {
-    _.fold(
-      _ => DefaultRequestBody(isMaxSizeExceeded = true),
-      xml =>
-        DefaultRequestBody(xml = Some(xml))
-    )
-  }
-
-  def tolerantXml(maxLength: Int): BodyParser[RequestBody] = parse.maxLength(orDefault(maxLength), parse.tolerantXml(Integer.MAX_VALUE)).map {
-    _.fold(
-      _ => DefaultRequestBody(isMaxSizeExceeded = true),
-      xml =>
-        DefaultRequestBody(xml = Some(xml))
-    )
-  }
-
-  def text(maxLength: Int): BodyParser[RequestBody] = parse.maxLength(orDefault(maxLength), parse.text(Integer.MAX_VALUE)).map {
-    _.fold(
-      _ => DefaultRequestBody(isMaxSizeExceeded = true),
-      text =>
-        DefaultRequestBody(text = Some(text))
-    )
-  }
-
-  def tolerantText(maxLength: Int): BodyParser[RequestBody] = parse.maxLength(orDefault(maxLength), parse.tolerantText(Integer.MAX_VALUE)).map {
-    _.fold(
-      _ => DefaultRequestBody(isMaxSizeExceeded = true),
-      text =>
-        DefaultRequestBody(text = Some(text))
-    )
-  }
-
-  def formUrlEncoded(maxLength: Int): BodyParser[RequestBody] = parse.maxLength(orDefault(maxLength), parse.urlFormEncoded(Integer.MAX_VALUE)).map {
-    _.fold(
-      _ => DefaultRequestBody(isMaxSizeExceeded = true),
-      urlFormEncoded =>
-        DefaultRequestBody(urlFormEncoded = Some(urlFormEncoded))
-    )
-  }
-
-  def multipartFormData(maxLength: Int): BodyParser[RequestBody] = parse.maxLength(orDefault(maxLength), parse.multipartFormData).map {
-    _.fold(
-      _ => DefaultRequestBody(isMaxSizeExceeded = true),
-      multipart =>
-        DefaultRequestBody(multipart = Some(multipart))
-    )
-  }
-
-  def raw(maxLength: Int): BodyParser[RequestBody] = parse.maxLength(orDefault(maxLength), parse.raw).map { body =>
-    body
-      .left.map(_ => DefaultRequestBody(isMaxSizeExceeded = true))
-      .right.map { raw =>
-        DefaultRequestBody(raw = Some(raw))
-      }.fold(identity, identity)
-  }
-
-  private def orDefault(maxLength: Int) = if (maxLength < 0) BodyParsers.parse.DEFAULT_MAX_TEXT_LENGTH else maxLength
+  private def orDefault(maxLength: Long) = if (maxLength < 0) parse.DefaultMaxTextLength else maxLength.toInt
 
 }

@@ -1,12 +1,18 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.api
 
+import javax.inject.{ Inject, Singleton }
+
 import play.api.mvc._
 import java.io.File
-import scala.util.control.NonFatal
+import play.core.j
+
 import scala.concurrent.Future
+import play.api.http._
+import play.core.actions.HeadAction
+import play.api.http.Status._
 
 /**
  * Defines an application’s global settings.
@@ -24,7 +30,30 @@ import scala.concurrent.Future
  */
 trait GlobalSettings {
 
-  import Results._
+  private val dhehCache = Application.instanceCache[DefaultHttpErrorHandler]
+  /**
+   * Note, this should only be used for the default implementations of onError, onHandlerNotFound and onBadRequest.
+   */
+  private def defaultErrorHandler: HttpErrorHandler = {
+    Play.maybeApplication.fold[HttpErrorHandler](DefaultHttpErrorHandler)(dhehCache)
+  }
+
+  /**
+   * This should be used for all invocations of error handling in Global.
+   */
+  private def configuredErrorHandler: HttpErrorHandler = {
+    Play.maybeApplication.fold[HttpErrorHandler](DefaultHttpErrorHandler)(_.errorHandler)
+  }
+
+  private val jchrhCache = Application.instanceCache[JavaCompatibleHttpRequestHandler]
+  private def defaultRequestHandler: Option[DefaultHttpRequestHandler] = {
+    Play.maybeApplication.map(jchrhCache)
+  }
+
+  private val httpFiltersCache = Application.instanceCache[HttpFilters]
+  private def filters: HttpFilters = {
+    Play.maybeApplication.fold[HttpFilters](NoHttpFilters)(httpFiltersCache)
+  }
 
   /**
    * Called before the application starts.
@@ -53,21 +82,20 @@ trait GlobalSettings {
   }
 
   /**
-   * Additional configuration provided by the application.  This is invoked by the default implementation of
-   * onConfigLoad, so if you override that, this won't be invoked.
+   * @deprecated This method does not do anything.
+   * Instead, specify configuration in your config file
+   * or make your own ApplicationLoader (see GuiceApplicationBuilder.loadConfig).
    */
-  def configuration: Configuration = Configuration.empty
+  @Deprecated
+  final def configuration: Configuration = Configuration.empty
 
   /**
-   * Called just after configuration has been loaded, to give the application an opportunity to modify it.
-   *
-   * @param config the loaded configuration
-   * @param path the application path
-   * @param classloader The applications classloader
-   * @param mode The mode the application is running in
-   * @return The configuration that the application should use
+   * @deprecated This method does not do anything.
+   * Instead, specify configuration in your config file
+   * or make your own ApplicationLoader (see GuiceApplicationBuilder.loadConfig).
    */
-  def onLoadConfig(config: Configuration, path: File, classloader: ClassLoader, mode: Mode.Mode): Configuration =
+  @Deprecated
+  final def onLoadConfig(config: Configuration, path: File, classloader: ClassLoader, mode: Mode.Mode): Configuration =
     config ++ configuration
 
   /**
@@ -75,33 +103,55 @@ trait GlobalSettings {
    * Default is: route, tag request, then apply filters
    */
   def onRequestReceived(request: RequestHeader): (RequestHeader, Handler) = {
+    def notFoundHandler = Action.async(BodyParsers.parse.empty)(req =>
+      configuredErrorHandler.onClientError(req, NOT_FOUND)
+    )
+
     val (routedRequest, handler) = onRouteRequest(request) map {
       case handler: RequestTaggingHandler => (handler.tagRequest(request), handler)
       case otherHandler => (request, otherHandler)
     } getOrElse {
-      (request, Action.async(BodyParsers.parse.empty)(_ => this.onHandlerNotFound(request)))
+
+      // We automatically permit HEAD requests against any GETs without the need to
+      // add an explicit mapping in Routes
+      val missingHandler: Handler = request.method match {
+        case HttpVerbs.HEAD =>
+          val headAction = onRouteRequest(request.copy(method = HttpVerbs.GET)) match {
+            case Some(action: EssentialAction) => action
+            case None => notFoundHandler
+          }
+          new HeadAction(headAction)
+        case _ =>
+          notFoundHandler
+      }
+      (request, missingHandler)
     }
 
     (routedRequest, doFilter(rh => handler)(routedRequest))
   }
 
+  val httpConfigurationCache = Application.instanceCache[HttpConfiguration]
   /**
    * Filters.
    */
   def doFilter(next: RequestHeader => Handler): (RequestHeader => Handler) = {
     (request: RequestHeader) =>
-      {
-        next(request) match {
-          case action: EssentialAction => doFilter(action)
-          case handler => handler
-        }
+      val context = Play.maybeApplication.fold("") { app =>
+        httpConfigurationCache(app).context.stripSuffix("/")
+      }
+      val inContext = context.isEmpty || request.path == context || request.path.startsWith(context + "/")
+      next(request) match {
+        case action: EssentialAction if inContext => doFilter(action)
+        case handler => handler
       }
   }
 
   /**
    * Filters for EssentialAction.
    */
-  def doFilter(next: EssentialAction): EssentialAction = next
+  def doFilter(next: EssentialAction): EssentialAction = {
+    filters.filters.foldRight(next)(_ apply _)
+  }
 
   /**
    * Called when an HTTP request has been received.
@@ -112,9 +162,9 @@ trait GlobalSettings {
    * @return an action to handle this request - if no action is returned, a 404 not found result will be sent to client
    * @see onHandlerNotFound
    */
-  def onRouteRequest(request: RequestHeader): Option[Handler] = Play.maybeApplication.flatMap(_.routes.flatMap { router =>
-    router.handlerFor(request)
-  })
+  def onRouteRequest(request: RequestHeader): Option[Handler] = defaultRequestHandler.flatMap { handler =>
+    handler.routeRequest(request)
+  }
 
   /**
    * Called when an exception occurred.
@@ -125,24 +175,8 @@ trait GlobalSettings {
    * @param ex The exception
    * @return The result to send to the client
    */
-  def onError(request: RequestHeader, ex: Throwable): Future[SimpleResult] = {
-    try {
-      Future.successful(InternalServerError(Play.maybeApplication.map {
-        case app if app.mode != Mode.Prod => views.html.defaultpages.devError.f
-        case app => views.html.defaultpages.error.f
-      }.getOrElse(views.html.defaultpages.devError.f) {
-        ex match {
-          case e: UsefulException => e
-          case NonFatal(e) => UnexpectedException(unexpected = Some(e))
-        }
-      }))
-    } catch {
-      case NonFatal(e) => {
-        Logger.error("Error while rendering default error page", e)
-        Future.successful(InternalServerError)
-      }
-    }
-  }
+  def onError(request: RequestHeader, ex: Throwable): Future[Result] =
+    defaultErrorHandler.onServerError(request, ex)
 
   /**
    * Called when no action was found to serve a request.
@@ -152,12 +186,8 @@ trait GlobalSettings {
    * @param request the HTTP request header
    * @return the result to send to the client
    */
-  def onHandlerNotFound(request: RequestHeader): Future[SimpleResult] = {
-    Future.successful(NotFound(Play.maybeApplication.map {
-      case app if app.mode != Mode.Prod => views.html.defaultpages.devNotFound.f
-      case app => views.html.defaultpages.notFound.f
-    }.getOrElse(views.html.defaultpages.devNotFound.f)(request, Play.maybeApplication.flatMap(_.routes))))
-  }
+  def onHandlerNotFound(request: RequestHeader): Future[Result] =
+    defaultErrorHandler.onClientError(request, play.api.http.Status.NOT_FOUND)
 
   /**
    * Called when an action has been found, but the request parsing has failed.
@@ -167,21 +197,11 @@ trait GlobalSettings {
    * @param request the HTTP request header
    * @return the result to send to the client
    */
-  def onBadRequest(request: RequestHeader, error: String): Future[SimpleResult] = {
-    Future.successful(BadRequest(views.html.defaultpages.badRequest(request, error)))
-  }
+  def onBadRequest(request: RequestHeader, error: String): Future[Result] =
+    defaultErrorHandler.onClientError(request, play.api.http.Status.BAD_REQUEST, error)
 
+  @deprecated("onRequestCompletion is no longer invoked by Play. The same functionality can be achieved by adding a filter that attaches a onDoneEnumerating callback onto the returned Result Enumerator.", "2.4.0")
   def onRequestCompletion(request: RequestHeader) {
-  }
-
-  /**
-   * Manages controllers instantiation.
-   *
-   * @param controllerClass the controller class to instantiate.
-   * @return the appropriate instance for the given controller class.
-   */
-  def getControllerInstance[A](controllerClass: Class[A]): A = {
-    controllerClass.newInstance();
   }
 
 }
@@ -191,10 +211,55 @@ trait GlobalSettings {
  */
 object DefaultGlobal extends GlobalSettings
 
+object GlobalSettings {
+
+  /**
+   * Load the global object.
+   *
+   * @param configuration The configuration to read the loading from.
+   * @param environment The environment to load the global object from.
+   * @return
+   */
+  def apply(configuration: Configuration, environment: Environment): GlobalSettings = {
+    val globalClass = configuration.getString("application.global").getOrElse("Global")
+
+    def javaGlobal: Option[play.GlobalSettings] = try {
+      Option(environment.classLoader.loadClass(globalClass).newInstance().asInstanceOf[play.GlobalSettings])
+    } catch {
+      case e: InstantiationException => None
+      case e: ClassNotFoundException => None
+    }
+
+    def scalaGlobal: GlobalSettings = try {
+      environment.classLoader.loadClass(globalClass + "$").getDeclaredField("MODULE$").get(null).asInstanceOf[GlobalSettings]
+    } catch {
+      case e: ClassNotFoundException if !configuration.getString("application.global").isDefined => DefaultGlobal
+      case e if configuration.getString("application.global").isDefined => {
+        throw configuration.reportError("application.global",
+          s"Cannot initialize the custom Global object ($globalClass) (perhaps it's a wrong reference?)", Some(e))
+      }
+    }
+
+    try {
+      javaGlobal.map(new j.JavaGlobalSettingsAdapter(_)).getOrElse(scalaGlobal)
+    } catch {
+      case e: PlayException => throw e
+      case e: ThreadDeath => throw e
+      case e: VirtualMachineError => throw e
+      case e: Throwable => throw new PlayException(
+        "Cannot init the Global object",
+        e.getMessage,
+        e
+      )
+    }
+  }
+}
+
 /**
  * The Global plugin executes application's `globalSettings` `onStart` and `onStop`.
  */
-class GlobalPlugin(app: Application) extends Plugin {
+@Singleton
+class GlobalPlugin @Inject() (app: Application) extends Plugin.Deprecated {
 
   // Call before start now
   app.global.beforeStart(app)

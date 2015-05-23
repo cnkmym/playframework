@@ -1,4 +1,4 @@
-<!--- Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com> -->
+<!--- Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com> -->
 # Working with sub-projects
 
 A complex project is not necessarily composed of a single Play application. You may want to split a large project into several smaller applications, or even extract some logic into a standard Java or Scala library that has nothing to do with a Play application.
@@ -10,17 +10,14 @@ It will be helpful to read the [SBT documentation on multi-project builds](http:
 You can make your application depend on a simple library project. Just add another sbt project definition in your `build.sbt` file:
 
 ```
-import play.Project._
-
 name := "my-first-application"
 
 version := "1.0"
 
-playScalaSettings
-
-lazy val myFirstApplication = project.in(file("."))
+lazy val myFirstApplication = (project in file("."))
+    .enablePlugins(PlayScala)
     .aggregate(myLibrary)
-    .depends(myLibrary)
+    .dependsOn(myLibrary)
 
 lazy val myLibrary = project
 ```
@@ -77,10 +74,10 @@ import sbt._
 import Keys._
 
 object Common {
-  val settings: Seq[Setting[_]] = {
+  val settings: Seq[Setting[_]] = Seq(
     organization := "com.example",
     version := "1.2.3-SNAPSHOT"
-  }
+  )
 
   val fooDependency = "com.foo" %% "foo" % "2.4"
 }
@@ -93,12 +90,12 @@ name := "my-sub-module"
 
 Common.settings
 
-libraryDependencies += fooDependency
+libraryDependencies += Common.fooDependency
 ```
 
 ## Splitting your web application into several parts
 
-As a Play application is just a standard sbt project with a default configuration, it can depend on another Play application.  You can make any sub module a Play application by including `playScalaSettings` or `playJavaSettings`, depending on whether your project is a Java or Scala project, in its corresponding `build.sbt` file.
+As a Play application is just a standard sbt project with a default configuration, it can depend on another Play application.  You can make any sub module a Play application by adding the `PlayJava` or `PlayScala` plugins, depending on whether your project is a Java or Scala project, in its corresponding `build.sbt` file.
 
 > **Note:** In order to avoid naming collision, make sure your controllers, including the Assets controller in your subprojects are using a different name space than the main project
 
@@ -113,12 +110,10 @@ It's also possible to split the route file into smaller pieces. This is a very h
 ```scala
 name := "myproject"
 
-playScalaSettings
+lazy val admin = (project in file("modules/admin")).enablePlugins(PlayScala)
 
-lazy val admin = project.in(file("modules/admin"))
-
-lazy val main = project.in(file("."))
-    .dependsOn(admin).aggregate(admin)
+lazy val main = (project in file("."))
+    .enablePlugins(PlayScala).dependsOn(admin).aggregate(admin)
 ```
 
 `modules/admin/build.sbt`
@@ -126,10 +121,8 @@ lazy val main = project.in(file("."))
 ```scala
 name := "myadmin"
 
-playScalaSettings
-
 libraryDependencies ++= Seq(
-  "mysql" % "mysql-connector-java" % "5.1.18",
+  "mysql" % "mysql-connector-java" % "5.1.35",
   jdbc,
   anorm
 )
@@ -147,8 +140,8 @@ conf
   └ application.conf
   └ routes
 modules
- └ build.sbt
   └ admin
+    └ build.sbt
     └ conf
       └ admin.routes
     └ app
@@ -156,11 +149,11 @@ modules
       └ models
       └ views
 project
- └ build.properties
- └ plugins.sbt
+  └ build.properties
+  └ plugins.sbt
 ```
 
-> **Note:** Configuration and route file names must be unique in the whole project structure. Particularly, there must be only one `application.conf` file and only one `routes` file. To define additional routes or configuration in sub-projects, use sub-project-specific names. For instance, the route file in `admin` is called `admin.routes`. To use a specific set of settings in development mode for a sub project, it would be even better to put these settings into the build file, e.g. `Keys.devSettings += ("application.router", "admin.Routes")`.
+> **Note:** Configuration and route file names must be unique in the whole project structure. Particularly, there must be only one `application.conf` file and only one `routes` file. To define additional routes or configuration in sub-projects, use sub-project-specific names. For instance, the route file in `admin` is called `admin.routes`. To use a specific set of settings in development mode for a sub project, it would be even better to put these settings into the build file, e.g. `Keys.devSettings += ("play.http.router", "admin.Routes")`.
 
 `conf/routes`:
 
@@ -180,8 +173,6 @@ GET /index                  controllers.admin.Application.index()
 GET /assets/*file           controllers.admin.Assets.at(path="/public", file)
 
 ```
-
-> **Note:** To export compiled routes to other projects disable reverse ref routing generation using generateRefReverseRouter := false sbt settings. Since routes_reverseRouting depends on every controller disabling the ref routing generation will also improve the compilation speed.
 
 ### Assets and controller classes should be all defined in the `controllers.admin` package
 

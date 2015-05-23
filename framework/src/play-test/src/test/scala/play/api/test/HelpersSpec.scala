@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.api.test
 
@@ -7,7 +7,8 @@ import play.api.test._
 import play.api.test.Helpers._
 import play.api.mvc._
 import play.api.mvc.Results._
-import scala.concurrent.ExecutionContext.Implicits.global
+import play.api.libs.iteratee.Enumerator
+import play.twirl.api.Content
 import scala.concurrent.Future
 
 import org.specs2.mutable._
@@ -55,6 +56,10 @@ class HelpersSpec extends Specification {
       contentAsBytes(Future.successful(Ok("abc"))) must_== Array(97, 98, 99)
     }
 
+    "extract the content from chunked Result as Bytes" in {
+      contentAsBytes(Future.successful(Ok.chunked(Enumerator("a", "b", "c")))) must_== Array(97, 98, 99)
+    }
+
     "extract the content from Content as Bytes" in {
       val content = new Content {
         val body: String = "abc"
@@ -81,6 +86,5 @@ class HelpersSpec extends Specification {
     }
 
   }
-
 
 }

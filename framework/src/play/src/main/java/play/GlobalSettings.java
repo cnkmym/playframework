@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play;
 
@@ -48,7 +48,7 @@ public class GlobalSettings {
      * @param t is any throwable
      * @return null as the default implementation
      */
-    public F.Promise<SimpleResult> onError(RequestHeader request, Throwable t) {
+    public F.Promise<Result> onError(RequestHeader request, Throwable t) {
         return null;
     }
 
@@ -63,7 +63,7 @@ public class GlobalSettings {
     @SuppressWarnings("rawtypes")
     public Action onRequest(Request request, Method actionMethod) {
         return new Action.Simple() {
-            public F.Promise<SimpleResult> call(Context ctx) throws Throwable {
+            public F.Promise<Result> call(Context ctx) throws Throwable {
                 return delegate.call(ctx);
             }
         };
@@ -95,7 +95,7 @@ public class GlobalSettings {
      * @param request the HTTP request
      * @return null in the default implementation, you can return your own custom Result in your Global class.
      */
-    public F.Promise<SimpleResult> onHandlerNotFound(RequestHeader request) {
+    public F.Promise<Result> onHandlerNotFound(RequestHeader request) {
         return null;
     }
 
@@ -110,42 +110,27 @@ public class GlobalSettings {
      * @param request the HTTP request
      * @return null in the default implementation, you can return your own custom Result in your Global class.
      */
-    public F.Promise<SimpleResult> onBadRequest(RequestHeader request, String error) {
+    public F.Promise<Result> onBadRequest(RequestHeader request, String error) {
         return null;
     }
 
     /**
-     * Manages controllers instantiation.
-     *
-     * @param controllerClass the controller class to instantiate.
-     * @return the appropriate instance for the given controller class.
+     * @deprecated This method does not do anything.
+     * Instead, specify configuration in your config file
+     * or make your own ApplicationLoader (see GuiceApplicationBuilder.loadConfig).
      */
-    public <A> A getControllerInstance(Class<A> controllerClass) throws Exception {
+    @Deprecated
+    public final Configuration onLoadConfig(Configuration config, File path, ClassLoader classloader) {
         return null;
     }
 
     /**
-     * Called just after configuration has been loaded, to give the application an opportunity to modify it.
-     *
-     * @param config the loaded configuration
-     * @param path the application path
-     * @param classloader The applications classloader
-     * @return The configuration that the application should use
+     * @deprecated This method does not do anything.
+     * Instead, specify configuration in your config file
+     * or make your own ApplicationLoader (see GuiceApplicationBuilder.loadConfig).
      */
-    public Configuration onLoadConfig(Configuration config, File path, ClassLoader classloader) {
-        return null;
-    }
-
-    /**
-     * Called just after configuration has been loaded, to give the application an opportunity to modify it.
-     *
-     * @param config the loaded configuration
-     * @param path the application path
-     * @param classloader The applications classloader
-     * @param mode The mode of the application
-     * @return The configuration that the application should use
-     */
-    public Configuration onLoadConfig(Configuration config, File path, ClassLoader classloader, Mode mode) {
+    @Deprecated
+    public final Configuration onLoadConfig(Configuration config, File path, ClassLoader classloader, Mode mode) {
         return onLoadConfig(config, path, classloader);
     }
 

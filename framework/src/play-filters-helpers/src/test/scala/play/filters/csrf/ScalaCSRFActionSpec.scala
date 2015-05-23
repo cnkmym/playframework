@@ -1,11 +1,10 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.filters.csrf
 
-import play.api.libs.ws.WS.WSRequestHolder
 import scala.concurrent.Future
-import play.api.libs.ws.{WS, Response}
+import play.api.libs.ws.{ WS, WSResponse, WSRequest }
 import play.api.mvc._
 
 /**
@@ -13,9 +12,13 @@ import play.api.mvc._
  */
 object ScalaCSRFActionSpec extends CSRFCommonSpecs {
 
-  def buildCsrfCheckRequest(configuration: (String, String)*) = new CsrfTester {
-    def apply[T](makeRequest: (WSRequestHolder) => Future[Response])(handleResponse: (Response) => T) = withServer(configuration) {
-      case _ => CSRFCheck(Action(Results.Ok))
+  def buildCsrfCheckRequest(sendUnauthorizedResult: Boolean, configuration: (String, String)*) = new CsrfTester {
+    def apply[T](makeRequest: (WSRequest) => Future[WSResponse])(handleResponse: (WSResponse) => T) = withServer(configuration) {
+      case _ => if (sendUnauthorizedResult) {
+        CSRFCheck(Action(Results.Ok), new CustomErrorHandler())
+      } else {
+        CSRFCheck(Action(Results.Ok))
+      }
     } {
       import play.api.Play.current
       handleResponse(await(makeRequest(WS.url("http://localhost:" + testServerPort))))
@@ -23,7 +26,7 @@ object ScalaCSRFActionSpec extends CSRFCommonSpecs {
   }
 
   def buildCsrfAddToken(configuration: (String, String)*) = new CsrfTester {
-    def apply[T](makeRequest: (WSRequestHolder) => Future[Response])(handleResponse: (Response) => T) = withServer(configuration) {
+    def apply[T](makeRequest: (WSRequest) => Future[WSResponse])(handleResponse: (WSResponse) => T) = withServer(configuration) {
       case _ => CSRFAddToken(Action {
         implicit req =>
           CSRF.getToken(req).map {
@@ -35,5 +38,10 @@ object ScalaCSRFActionSpec extends CSRFCommonSpecs {
       import play.api.Play.current
       handleResponse(await(makeRequest(WS.url("http://localhost:" + testServerPort))))
     }
+  }
+
+  class CustomErrorHandler extends CSRF.ErrorHandler {
+    import play.api.mvc.Results.Unauthorized
+    def handle(req: RequestHeader, msg: String) = Future.successful(Unauthorized(msg))
   }
 }

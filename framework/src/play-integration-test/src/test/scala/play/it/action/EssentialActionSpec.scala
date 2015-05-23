@@ -1,12 +1,12 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.it.action
 
 import play.api.libs.json.Json
-import play.api.mvc.{Action, EssentialAction}
+import play.api.mvc.{ Action, EssentialAction }
 import play.api.mvc.Results._
-import play.api.test.{FakeApplication, PlaySpecification, FakeRequest}
+import play.api.test.{ FakeApplication, PlaySpecification, FakeRequest }
 import scala.concurrent.Promise
 
 object EssentialActionSpec extends PlaySpecification {
@@ -27,7 +27,6 @@ object EssentialActionSpec extends PlaySpecification {
       contentAsString(result) mustEqual "value"
     }
 
-
     "use the classloader of the running application" in {
 
       val actionClassLoader = Promise[ClassLoader]()
@@ -37,7 +36,7 @@ object EssentialActionSpec extends PlaySpecification {
       }
 
       // start fake application with its own classloader
-      val applicationClassLoader = new ClassLoader(){}
+      val applicationClassLoader = new ClassLoader() {}
       val fakeApplication = FakeApplication(classloader = applicationClassLoader)
 
       running(fakeApplication) {

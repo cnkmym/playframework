@@ -1,12 +1,10 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.libs;
 
 import com.fasterxml.jackson.databind.JsonNode;
-
-import play.mvc.Content;
-import play.libs.Json;
+import play.twirl.api.Content;
 
 /**
  * The JSONP Content renders a JavaScript call of a JSON object.<br>

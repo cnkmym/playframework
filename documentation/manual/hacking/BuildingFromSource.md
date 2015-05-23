@@ -1,10 +1,10 @@
-<!--- Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com> -->
-# Building Play from sources
+<!--- Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com> -->
+# Building Play from source
 
-To benefit from the latest improvements and bug fixes after the initial beta release, you may want to compile Play from sources. You’ll need a [Git client](http://git-scm.com/) to fetch the sources.
+To benefit from the latest improvements and bug fixes after the initial beta release, you may want to compile Play from source. You’ll need a [Git client](https://git-scm.com/) to fetch the source.
 
 ## Grab the source
-From the shell, first checkout the Play sources:
+From the shell, first checkout the Play source:
 
 ```bash
 $ git clone git://github.com/playframework/playframework.git
@@ -15,16 +15,24 @@ Then go to the `playframework/framework` directory and launch the `build` script
 ```bash
 $ cd playframework/framework
 $ ./build
-> publish-local
+> publishLocal
 ```
 
-> Note that you don’t need to install sbt yourself: Play embeds its own version.
+This will build and publish Play for the default Scala version (currently 2.10.5). If you want to publish for all versions, you can cross build:
 
-If you want to make changes to the code you can use `publish-local` to rebuild the framework.
+```bash
+> +publishLocal
+```
+
+Or to publish for a specific Scala version:
+
+```bash
+> +++2.11.6 publishLocal
+```
 
 ## Build the documentation
 
-Documentation is available at playframework/documentation as Markdown files.  To see HTML, run the following:
+Documentation is available at `playframework/documentation` as Markdown files. To see HTML, run the following:
 
 ```bash
 $ cd playframework/documentation
@@ -33,47 +41,43 @@ $ ./build run
 
 To see documentation at [http://localhost:9000/@documentation](http://localhost:9000/@documentation)
 
-To build the Scaladoc and Javadoc, run `doc` against the source code:
-
-```bash
-$ cd playframework/framework
-$ ./build doc
-```
+For more details on developing the Play documentation, see the [[Documentation Guidelines|Documentation]].
 
 ## Run tests
 
 You can run basic tests from the sbt console using the `test` task:
 
-```
+```bash
 > test
 ```
 
-We are also using several Play applications to test the framework. To run this complete test suite, use the `runtests` script:
+Like with publishing, you can prefix the command with `+` to run the tests against all supported Scala versions.
 
-```
+The Play PR validation runs a few more tests than just the basic tests, including scripted tests, testing the documentation code samples, and testing the Play activator templates.  To run all the tests, run the `framework/runtests` script:
+
+```bash
+$ cd playframework/framework
 $ ./runtests
 ```
 
 ## Use in projects
 
-Creating projects using the Play version you have built from source works much the same as a regular Play application.
+Compiling and running projects using the Play version you have built from source requires some custom configuration.
 
-export PATH=$PATH:<projdir>/
+Navigate to your existing Play project and make the following edits in `project/plugins.sbt`:
 
-If you have an existing Play application that you are upgrading, please add
-
-```
-resolvers ++= Seq(
-  ...
-  Resolver.file("Local Repository", file("<projdir>/repository/local"))(Resolver.ivyStylePatterns),
-  ...
-)
-
-addSbtPlugin("com.typesafe.play" % "sbt-plugin" % "2.3-SNAPSHOT")
+```scala
+// Change the sbt plugin to use the local Play build (2.4.0-SNAPSHOT)
+addSbtPlugin("com.typesafe.play" % "sbt-plugin" % "2.4.0-SNAPSHOT")
 ```
 
-to project/plugins.sbt. 
+Once you have done this, you can start the console and interact with your project normally:
+
+```bash
+$ cd <projectdir>
+$ activator
+```
 
 ## Using Code in Eclipse
 
-You can find at [Stackoverflow](http://stackoverflow.com/questions/10053201/how-to-setup-eclipse-ide-work-on-the-playframework-2-0/10055419#10055419) some information how to setup eclipse to work on the code.
+You can find at [Stackoverflow](https://stackoverflow.com/questions/10053201/how-to-setup-eclipse-ide-work-on-the-playframework-2-0/10055419#10055419) some information how to setup eclipse to work on the code.

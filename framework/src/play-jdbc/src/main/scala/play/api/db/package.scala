@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.api
 
@@ -11,4 +11,6 @@ package play.api
  * val conn = DB.getConnection("customers")
  * }}}
  */
-package object db
+package object db {
+  type NamedDatabase = play.db.NamedDatabase
+}

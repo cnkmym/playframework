@@ -1,32 +1,45 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+  * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.api.libs.ws.ning
 
-import com.ning.http.client.{ Response => AHCResponse, Cookie => AHCCookie, ProxyServer => AHCProxyServer, _ }
+import java.io.UnsupportedEncodingException
+import java.nio.charset.{ Charset, StandardCharsets }
+import javax.inject.{ Inject, Provider, Singleton }
+
+import com.ning.http.client.{ Response => AHCResponse, ProxyServer => AHCProxyServer, _ }
+import com.ning.http.client.cookie.{ Cookie => AHCCookie }
 import com.ning.http.client.Realm.{ RealmBuilder, AuthScheme }
 import com.ning.http.util.AsyncHttpProviderUtils
+import org.jboss.netty.handler.codec.http.HttpHeaders
+import play.api.inject.{ ApplicationLifecycle, Module }
+import play.core.parsers.FormUrlEncodedParser
 
 import collection.immutable.TreeMap
 
-import scala.concurrent.{ Future, Promise, ExecutionContext }
-
-import java.io.File
-import java.util.concurrent.atomic.AtomicReference
+import scala.concurrent.{ Future, Promise }
 
 import play.api.libs.ws._
-import play.api.http.{ Writeable, ContentTypeOf }
-import play.api.libs.iteratee._
-import play.api.libs.iteratee.Input.El
-import play.api.{ Application, Play }
+import play.api.libs.ws.ssl._
 
+import play.api.libs.iteratee._
+import play.api._
 import play.core.utils.CaseInsensitiveOrdered
+import play.api.libs.ws.DefaultWSResponseHeaders
+import play.api.libs.iteratee.Input.El
+import play.api.libs.ws.ssl.debug._
+
+import scala.collection.JavaConverters._
 
 /**
  * A WS client backed by a Ning AsyncHttpClient.
- * @param config the config for AsyncHttpClient
+ *
+ * If you need to debug Ning, set logger.com.ning.http.client=DEBUG in your application.conf file.
+ *
+ * @param config a client configuration object
  */
-class NingWSClient(config: AsyncHttpClientConfig) extends WSClient {
+case class NingWSClient(config: AsyncHttpClientConfig) extends WSClient {
+
   private val asyncHttpClient = new AsyncHttpClient(config)
 
   def underlying[T] = asyncHttpClient.asInstanceOf[T]
@@ -35,189 +48,125 @@ class NingWSClient(config: AsyncHttpClientConfig) extends WSClient {
 
   def close() = asyncHttpClient.close()
 
-  def url(url: String): WSRequestHolder = NingWSRequestHolder(this, url, Map(), Map(), None, None, None, None, None, None)
+  def url(url: String): WSRequest = NingWSRequest(this, url, "GET", EmptyBody, Map(), Map(), None, None, None, None, None, None, None)
+}
+
+object NingWSClient {
+  /**
+   * Convenient factory method that uses a [[WSClientConfig]] value for configuration instead of an [[AsyncHttpClientConfig]].
+   *
+   * Typical usage:
+   *
+   * {{{
+   *   val client = NingWSClient()
+   *   val request = client.url(someUrl).get()
+   *   request.foreach { response =>
+   *     doSomething(response)
+   *     client.close()
+   *   }
+   * }}}
+   *
+   * @param config configuration settings
+   */
+  def apply(config: NingWSClientConfig = NingWSClientConfig()): NingWSClient = {
+    val client = new NingWSClient(new NingAsyncHttpClientConfigBuilder(config).build())
+    new SystemConfiguration().configure(config.wsClientConfig)
+    client
+  }
 }
 
 /**
- * A WS Request.
+ * A Ning WS Request.
  */
 case class NingWSRequest(client: NingWSClient,
-  private val _method: String,
-  private val _auth: Option[(String, String, WSAuthScheme)],
-  private val _calc: Option[WSSignatureCalculator],
-  builder: RequestBuilder)
-    extends WSRequest {
+    url: String,
+    method: String,
+    body: WSBody,
+    headers: Map[String, Seq[String]],
+    queryString: Map[String, Seq[String]],
+    calc: Option[WSSignatureCalculator],
+    auth: Option[(String, String, WSAuthScheme)],
+    followRedirects: Option[Boolean],
+    requestTimeout: Option[Int],
+    virtualHost: Option[String],
+    proxyServer: Option[WSProxyServer],
+    disableUrlEncoding: Option[Boolean]) extends WSRequest {
 
-  import scala.collection.JavaConverters._
+  def sign(calc: WSSignatureCalculator): WSRequest = copy(calc = Some(calc))
 
-  protected var body: Option[String] = None
+  def withAuth(username: String, password: String, scheme: WSAuthScheme): WSRequest =
+    copy(auth = Some((username, password, scheme)))
 
-  protected var calculator: Option[WSSignatureCalculator] = _calc
+  def withHeaders(hdrs: (String, String)*): WSRequest = {
+    val headers = hdrs.foldLeft(this.headers)((m, hdr) =>
+      if (m.contains(hdr._1)) m.updated(hdr._1, m(hdr._1) :+ hdr._2)
+      else m + (hdr._1 -> Seq(hdr._2))
+    )
+    copy(headers = headers)
+  }
 
-  protected var headers: Map[String, Seq[String]] = Map()
+  def withQueryString(parameters: (String, String)*): WSRequest =
+    copy(queryString = parameters.foldLeft(this.queryString) {
+      case (m, (k, v)) => m + (k -> (v +: m.getOrElse(k, Nil)))
+    })
 
-  protected var _url: String = null
+  def withFollowRedirects(follow: Boolean): WSRequest = copy(followRedirects = Some(follow))
 
-  //this will do a java mutable set hence the {} response
-  _auth.map(data => auth(data._1, data._2, authScheme(data._3))).getOrElse({})
+  def withRequestTimeout(timeout: Long): WSRequest = {
+    require(timeout >= 0 && timeout <= Int.MaxValue, s"Request timeout must be between 0 and ${Int.MaxValue}")
+    copy(requestTimeout = Some(timeout.toInt))
+  }
+
+  def withVirtualHost(vh: String): WSRequest = copy(virtualHost = Some(vh))
+
+  def withProxyServer(proxyServer: WSProxyServer): WSRequest = copy(proxyServer = Some(proxyServer))
+
+  def withBody(body: WSBody): WSRequest = copy(body = body)
+
+  def withMethod(method: String): WSRequest = copy(method = method)
+
+  def execute(): Future[WSResponse] = execute(buildRequest())
+
+  def stream(): Future[(WSResponseHeaders, Enumerator[Array[Byte]])] = executeStream(buildRequest())
 
   /**
-   * Return the current headers of the request being constructed
+   * Returns the current headers of the request, using the request builder.  This may be signed,
+   * so may return extra headers that were not directly input.
    */
-  def allHeaders: Map[String, Seq[String]] = {
-    mapAsScalaMapConverter(builder.build().getHeaders).asScala.map(e => e._1 -> e._2.asScala.toSeq).toMap
+  def requestHeaders: Map[String, Seq[String]] = ningHeadersToMap(buildRequest().getHeaders)
+
+  /**
+   * Returns the HTTP header given by name, using the request builder.  This may be signed,
+   * so may return extra headers that were not directly input.
+   */
+  def requestHeader(name: String): Option[String] = requestHeaders.get(name).flatMap(_.headOption)
+
+  /**
+   * Returns the current query string parameters, using the request builder.  This may be signed,
+   * so may not return the same parameters that were input.
+   */
+  def requestQueryParams: Map[String, Seq[String]] = {
+    val params: java.util.List[Param] = buildRequest().getQueryParams
+    params.asScala.toSeq.groupBy(_.getName).mapValues(_.map(_.getValue))
   }
 
   /**
-   * Return the current query string parameters
+   * Returns the current URL, using the request builder.  This may be signed by OAuth, as opposed
+   * to request.url.
    */
-  def queryString: Map[String, Seq[String]] = {
-    val request = builder.build()
-    val params = request.getParams
-    require(params != null)
-    mapAsScalaMapConverter(params).asScala.map {
-      e =>
-        e._1 -> e._2.asScala.toSeq
-    }.toMap
-  }
+  def requestUrl: String = buildRequest().getUrl
 
   /**
-   * Retrieve an HTTP header.
+   * Returns the body as an array of bytes.
    */
-  def header(name: String): Option[String] = headers.get(name).flatMap(_.headOption)
-
-  /**
-   * The HTTP method.
-   */
-  def method: String = _method
-
-  /**
-   * The URL
-   */
-  def url: String = _url
-
-  def getStringData: String = body.getOrElse("")
-
-  /**
-   * Set an HTTP header.
-   */
-  @scala.deprecated("This will be a protected method, please use WSRequestHolder", "2.3.0")
-  override def setHeader(name: String, value: String): NingWSRequest = {
-    headers = headers + (name -> List(value))
-    this.copy(builder = builder.setHeader(name, value))
-  }
-
-  /**
-   * Add an HTTP header (used for headers with multiple values).
-   */
-  @scala.deprecated("This will be a protected method, please use WSRequestHolder", "2.3.0")
-  override def addHeader(name: String, value: String): NingWSRequest = {
-    headers = headers + (name -> (headers.get(name).getOrElse(List()) :+ value))
-    this.copy(builder = builder.addHeader(name, value))
-  }
-
-  /**
-   * Defines the request headers.
-   */
-  @scala.deprecated("This will be a protected method, please use WSRequestHolder", "2.3.0")
-  def setHeaders(hdrs: FluentCaseInsensitiveStringsMap): NingWSRequest = {
-    headers = ningHeadersToMap(hdrs)
-    this.copy(builder = builder.setHeaders(hdrs))
-  }
-
-  /**
-   * Defines the request headers.
-   */
-  @scala.deprecated("This will be a protected method, please use WSRequestHolder", "2.3.0")
-  def setHeaders(hdrs: java.util.Map[String, java.util.Collection[String]]): NingWSRequest = {
-    headers = ningHeadersToMap(hdrs)
-    this.copy(builder = builder.setHeaders(hdrs))
-  }
-
-  /**
-   * Defines the request headers.
-   */
-  @scala.deprecated("This will be a protected method, please use WSRequestHolder", "2.3.0")
-  def setHeaders(hdrs: Map[String, Seq[String]]): NingWSRequest = {
-    headers = hdrs
-    // roll up the builders using two foldlefts...
-    val newBuilder = hdrs.foldLeft(builder) {
-      (b, header) =>
-        header._2.foldLeft(b) {
-          (b2, value) =>
-            b2.addHeader(header._1, value)
-        }
+  def getBody: Option[Array[Byte]] = {
+    body match {
+      case InMemoryBody(bytes) => Some(bytes)
+      case _ => None
     }
-    this.copy(builder = newBuilder)
   }
 
-  /**
-   * Defines the query string.
-   */
-  @scala.deprecated("This will be a protected method, please use WSRequestHolder", "2.3.0")
-  def setQueryString(queryString: Map[String, Seq[String]]): NingWSRequest = {
-    val newBuilder = queryString.foldLeft(builder) {
-      (b, entry) =>
-        val (key, values) = entry
-        values.foldLeft(b) {
-          (b2, value) =>
-            b2.addQueryParameter(key, value)
-        }
-    }
-    this.copy(builder = newBuilder)
-  }
-
-  /**
-   * Defines the URL.
-   */
-  @scala.deprecated("This will be a protected method, please use WSRequestHolder", "2.3.0")
-  def setUrl(url: String): NingWSRequest = {
-    _url = url
-    this.copy(builder = builder.setUrl(url))
-  }
-
-  @scala.deprecated("This will be a protected method, please use WSRequestHolder", "2.3.0")
-  def setPerRequestConfig(config: PerRequestConfig): NingWSRequest = {
-    this.copy(builder = builder.setPerRequestConfig(config))
-  }
-
-  @scala.deprecated("This will be a protected method, please use WSRequestHolder", "2.3.0")
-  def setFollowRedirects(followRedirects: Boolean): NingWSRequest = {
-    this.copy(builder = builder.setFollowRedirects(followRedirects))
-  }
-
-  @scala.deprecated("This will be a protected method, please use WSRequestHolder", "2.3.0")
-  def setVirtualHost(virtualHost: String): NingWSRequest = {
-    this.copy(builder = builder.setVirtualHost(virtualHost))
-  }
-
-  @scala.deprecated("This will be a protected method, please use WSRequestHolder", "2.3.0")
-  def setProxyServer(proxyServer: AHCProxyServer): NingWSRequest = {
-    this.copy(builder = builder.setProxyServer(proxyServer))
-  }
-
-  @scala.deprecated("This will be a protected method, please use WSRequestHolder", "2.3.0")
-  def setBody(s: String): NingWSRequest = {
-    this.body = Some(s)
-    this.copy(builder = builder.setBody(s))
-  }
-
-  @scala.deprecated("This will be a protected method, please use WSRequestHolder", "2.3.0")
-  def setBody(bodyGenerator: BodyGenerator): NingWSRequest = {
-    this.copy(builder = builder.setBody(bodyGenerator))
-  }
-
-  @scala.deprecated("This will be a protected method, please use WSRequestHolder", "2.3.0")
-  def setBody(byteArray: Array[Byte]): NingWSRequest = {
-    this.copy(builder = builder.setBody(byteArray))
-  }
-
-  @scala.deprecated("This will be a protected method, please use WSRequestHolder", "2.3.0")
-  def build: com.ning.http.client.Request = {
-    builder.build()
-  }
-
-  private def authScheme(scheme: WSAuthScheme): AuthScheme = scheme match {
+  private[libs] def authScheme(scheme: WSAuthScheme): AuthScheme = scheme match {
     case WSAuthScheme.DIGEST => AuthScheme.DIGEST
     case WSAuthScheme.BASIC => AuthScheme.BASIC
     case WSAuthScheme.NTLM => AuthScheme.NTLM
@@ -230,29 +179,129 @@ case class NingWSRequest(client: NingWSClient,
   /**
    * Add http auth headers. Defaults to HTTP Basic.
    */
-  private def auth(username: String, password: String, scheme: AuthScheme = AuthScheme.BASIC): WSRequest = {
-    this.copy(builder = builder.setRealm((new RealmBuilder)
+  private[libs] def auth(username: String, password: String, scheme: AuthScheme = AuthScheme.BASIC): Realm = {
+    (new RealmBuilder)
       .setScheme(scheme)
       .setPrincipal(username)
       .setPassword(password)
       .setUsePreemptiveAuth(true)
-      .build()))
+      .build()
   }
 
-  private def ningHeadersToMap(headers: java.util.Map[String, java.util.Collection[String]]) =
-    mapAsScalaMapConverter(headers).asScala.map(e => e._1 -> e._2.asScala.toSeq).toMap
-
-  private def ningHeadersToMap(headers: FluentCaseInsensitiveStringsMap) = {
+  private[libs] def ningHeadersToMap(headers: FluentCaseInsensitiveStringsMap) = {
     val res = mapAsScalaMapConverter(headers).asScala.map(e => e._1 -> e._2.asScala.toSeq).toMap
     //todo: wrap the case insensitive ning map instead of creating a new one (unless perhaps immutabilty is important)
     TreeMap(res.toSeq: _*)(CaseInsensitiveOrdered)
   }
 
-  private[libs] def execute: Future[NingWSResponse] = {
+  def contentType: Option[String] = {
+    this.headers.find(p => p._1 == HttpHeaders.Names.CONTENT_TYPE).map {
+      case (header, values) =>
+        values.head
+    }
+  }
+
+  /**
+   * Creates and returns an AHC request, running all operations on it.
+   */
+  def buildRequest(): Request = {
+    // The builder has a bunch of mutable state and is VERY fiddly, so
+    // should not be exposed to the outside world.
+
+    val builder = disableUrlEncoding.map { disableEncodingFlag =>
+      new RequestBuilder(method, disableEncodingFlag)
+    }.getOrElse {
+      new RequestBuilder(method)
+    }
+
+    // Set the URL.
+    builder.setUrl(url)
+
+    // auth
+    auth.foreach { data =>
+      val realm = auth(data._1, data._2, authScheme(data._3))
+      builder.setRealm(realm)
+    }
+
+    // queries
+    for {
+      (key, values) <- queryString
+      value <- values
+    } builder.addQueryParam(key, value)
+
+    // Configuration settings on the builder, if applicable
+    virtualHost.foreach(builder.setVirtualHost)
+    followRedirects.foreach(builder.setFollowRedirects)
+    proxyServer.foreach(p => builder.setProxyServer(createProxy(p)))
+    requestTimeout.foreach(builder.setRequestTimeout)
+
+    // Set the body.
+    val possiblyModifiedHeaders = this.headers
+    val builderWithBody = body match {
+      case EmptyBody => builder
+      case FileBody(file) =>
+        import com.ning.http.client.generators.FileBodyGenerator
+        val bodyGenerator = new FileBodyGenerator(file)
+        builder.setBody(bodyGenerator)
+      case InMemoryBody(bytes) =>
+        // extract the content type and the charset
+        val ct: String = contentType.getOrElse("text/plain")
+        val charset = Charset.forName(
+          Option(AsyncHttpProviderUtils.parseCharset(ct)).getOrElse {
+            // NingWSRequest modifies headers to include the charset, but this fails tests in Scala.
+            //val contentTypeList = Seq(ct + "; charset=utf-8")
+            //possiblyModifiedHeaders = this.headers.updated(HttpHeaders.Names.CONTENT_TYPE, contentTypeList)
+            "utf-8"
+          }
+        )
+
+        try {
+          // Get the string body given the given charset...
+          val stringBody = new String(bytes, charset)
+          // The Ning signature calculator uses request.getFormParams() for calculation,
+          // so we have to parse it out and add it rather than using setBody.
+          if (ct.contains(HttpHeaders.Values.APPLICATION_X_WWW_FORM_URLENCODED)) {
+            val params = for {
+              (key, values) <- FormUrlEncodedParser.parse(stringBody).toSeq
+              value <- values
+            } yield new Param(key, value)
+            builder.setFormParams(params.asJava)
+          } else {
+            builder.setBody(stringBody)
+          }
+        } catch {
+          case e: UnsupportedEncodingException =>
+            throw new RuntimeException(e)
+        }
+
+        builder
+      case StreamedBody(bytes) =>
+        builder
+    }
+
+    // headers
+    for {
+      header <- possiblyModifiedHeaders
+      value <- header._2
+    } builder.addHeader(header._1, value)
+
+    // Set the signature calculator.
+    calc.map {
+      case signatureCalculator: com.ning.http.client.SignatureCalculator =>
+        builderWithBody.setSignatureCalculator(signatureCalculator)
+      case _ =>
+        throw new IllegalStateException("Unknown signature calculator found: use a class that implements SignatureCalculator")
+    }
+
+    builderWithBody.build()
+  }
+
+  private[libs] def execute(request: Request): Future[NingWSResponse] = {
+
     import com.ning.http.client.AsyncCompletionHandler
-    var result = Promise[NingWSResponse]()
-    calculator.map(_.sign(this))
-    client.executeRequest(builder.build(), new AsyncCompletionHandler[AHCResponse]() {
+    val result = Promise[NingWSResponse]()
+
+    client.executeRequest(request, new AsyncCompletionHandler[AHCResponse]() {
       override def onCompleted(response: AHCResponse) = {
         result.success(NingWSResponse(response))
         response
@@ -265,418 +314,176 @@ case class NingWSRequest(client: NingWSClient,
     result.future
   }
 
-  private[libs] def executeStream[A](consumer: WSResponseHeaders => Iteratee[Array[Byte], A])(implicit ec: ExecutionContext): Future[Iteratee[Array[Byte], A]] = {
+  private[libs] def executeStream(request: Request): Future[(WSResponseHeaders, Enumerator[Array[Byte]])] = {
+
     import com.ning.http.client.AsyncHandler
-    var doneOrError = false
-    calculator.map(_.sign(this))
 
-    var statusCode = 0
-    val iterateeP = Promise[Iteratee[Array[Byte], A]]()
-    var iteratee: Iteratee[Array[Byte], A] = null
+    val result = Promise[(WSResponseHeaders, Enumerator[Array[Byte]])]()
 
-    client.executeRequest(builder.build(), new AsyncHandler[Unit]() {
+    val errorInStream = Promise[Unit]()
+
+    val promisedIteratee = Promise[Iteratee[Array[Byte], Unit]]()
+
+    @volatile var doneOrError = false
+    @volatile var statusCode = 0
+    @volatile var current: Iteratee[Array[Byte], Unit] = Iteratee.flatten(promisedIteratee.future)
+
+    client.executeRequest(request, new AsyncHandler[Unit]() {
 
       import com.ning.http.client.AsyncHandler.STATE
 
       override def onStatusReceived(status: HttpResponseStatus) = {
-        statusCode = status.getStatusCode()
+        statusCode = status.getStatusCode
         STATE.CONTINUE
       }
 
       override def onHeadersReceived(h: HttpResponseHeaders) = {
-        val headers = h.getHeaders()
-        iteratee = consumer(DefaultWSResponseHeaders(statusCode, ningHeadersToMap(headers)))
+        val headers = h.getHeaders
+
+        val responseHeader = DefaultWSResponseHeaders(statusCode, ningHeadersToMap(headers))
+        val enumerator = new Enumerator[Array[Byte]]() {
+          def apply[A](i: Iteratee[Array[Byte], A]) = {
+
+            val doneIteratee = Promise[Iteratee[Array[Byte], A]]()
+
+            import play.api.libs.iteratee.Execution.Implicits.trampoline
+
+            // Map it so that we can complete the iteratee when it returns
+            val mapped = i.map {
+              a =>
+                doneIteratee.trySuccess(Done(a))
+                ()
+            }.recover {
+              // but if an error happens, we want to propogate that
+              case e =>
+                doneIteratee.tryFailure(e)
+                throw e
+            }
+
+            // Redeem the iteratee that we promised to the AsyncHandler
+            promisedIteratee.trySuccess(mapped)
+
+            // If there's an error in the stream from upstream, then fail this returned future with that
+            errorInStream.future.onFailure {
+              case e => doneIteratee.tryFailure(e)
+            }
+
+            doneIteratee.future
+          }
+        }
+
+        result.trySuccess((responseHeader, enumerator))
         STATE.CONTINUE
       }
 
       override def onBodyPartReceived(bodyPart: HttpResponseBodyPart) = {
         if (!doneOrError) {
-          iteratee = iteratee.pureFlatFold {
-            case Step.Done(a, e) => {
+          import play.api.libs.concurrent.Execution.Implicits.defaultContext
+          current = current.pureFlatFold {
+            case Step.Done(a, e) =>
               doneOrError = true
-              val it = Done(a, e)
-              iterateeP.success(it)
-              it
-            }
+              Done(a, e)
 
-            case Step.Cont(k) => {
-              k(El(bodyPart.getBodyPartBytes()))
-            }
+            case Step.Cont(k) =>
+              k(El(bodyPart.getBodyPartBytes))
 
-            case Step.Error(e, input) => {
+            case Step.Error(e, input) =>
               doneOrError = true
-              val it = Error(e, input)
-              iterateeP.success(it)
-              it
-            }
+              Error(e, input)
+
           }
           STATE.CONTINUE
         } else {
-          iteratee = null
+          current = null
           // Must close underlying connection, otherwise async http client will drain the stream
-          bodyPart.markUnderlyingConnectionAsClosed()
+          bodyPart.markUnderlyingConnectionAsToBeClosed()
           STATE.ABORT
         }
       }
 
       override def onCompleted() = {
-        Option(iteratee).map(iterateeP.success)
+        Option(current).foreach(_.run)
       }
 
       override def onThrowable(t: Throwable) = {
-        iterateeP.failure(t)
+        result.tryFailure(t)
+        errorInStream.tryFailure(t)
       }
     })
-    iterateeP.future
+    result.future
+  }
+
+  private[libs] def createProxy(wsProxyServer: WSProxyServer): AHCProxyServer = {
+
+    import com.ning.http.client.ProxyServer.Protocol
+
+    val protocol: Protocol = wsProxyServer.protocol.getOrElse("http").toLowerCase match {
+      case "http" => Protocol.HTTP
+      case "https" => Protocol.HTTPS
+      case "kerberos" => Protocol.KERBEROS
+      case "ntlm" => Protocol.NTLM
+      case "spnego" => Protocol.SPNEGO
+      case _ => scala.sys.error("Unrecognized protocol!")
+    }
+
+    val ningProxyServer = new AHCProxyServer(
+      protocol,
+      wsProxyServer.host,
+      wsProxyServer.port,
+      wsProxyServer.principal.orNull,
+      wsProxyServer.password.orNull)
+
+    wsProxyServer.encoding.foreach(enc => ningProxyServer.setCharset(Charset.forName(enc)))
+    wsProxyServer.ntlmDomain.foreach(ningProxyServer.setNtlmDomain)
+    for {
+      hosts <- wsProxyServer.nonProxyHosts
+      host <- hosts
+    } ningProxyServer.addNonProxyHost(host)
+
+    ningProxyServer
   }
 
 }
 
-/**
- * A WS Request builder.
- */
-case class NingWSRequestHolder(client: NingWSClient,
-    url: String,
-    headers: Map[String, Seq[String]],
-    queryString: Map[String, Seq[String]],
-    calc: Option[WSSignatureCalculator],
-    auth: Option[(String, String, WSAuthScheme)],
-    followRedirects: Option[Boolean],
-    requestTimeout: Option[Int],
-    virtualHost: Option[String],
-    proxyServer: Option[WSProxyServer]) extends WSRequestHolder {
-
-  /**
-   * sets the signature calculator for the request
-   * @param calc
-   */
-  def sign(calc: WSSignatureCalculator): WSRequestHolder = this.copy(calc = Some(calc))
-
-  /**
-   * sets the authentication realm
-   */
-  def withAuth(username: String, password: String, scheme: WSAuthScheme): WSRequestHolder =
-    this.copy(auth = Some((username, password, scheme)))
-
-  /**
-   * adds any number of HTTP headers
-   * @param hdrs
-   */
-  def withHeaders(hdrs: (String, String)*): WSRequestHolder = {
-    val headers = hdrs.foldLeft(this.headers)((m, hdr) =>
-      if (m.contains(hdr._1)) m.updated(hdr._1, m(hdr._1) :+ hdr._2)
-      else m + (hdr._1 -> Seq(hdr._2))
+class NingWSModule extends Module {
+  def bindings(environment: Environment, configuration: Configuration) = {
+    Seq(
+      bind[WSAPI].to[NingWSAPI],
+      bind[NingWSClientConfig].toProvider[NingWSClientConfigParser].in[Singleton],
+      bind[WSClientConfig].toProvider[WSConfigParser].in[Singleton],
+      bind[WSClient].toProvider[WSClientProvider].in[Singleton]
     )
-    this.copy(headers = headers)
-  }
-
-  /**
-   * adds any number of query string parameters to the
-   */
-  def withQueryString(parameters: (String, String)*): WSRequestHolder =
-    this.copy(queryString = parameters.foldLeft(queryString) {
-      case (m, (k, v)) => m + (k -> (v +: m.get(k).getOrElse(Nil)))
-    })
-
-  /**
-   * Sets whether redirects (301, 302) should be followed automatically
-   */
-  def withFollowRedirects(follow: Boolean): WSRequestHolder =
-    this.copy(followRedirects = Some(follow))
-
-  @scala.deprecated("use withRequestTimeout instead", "2.1.0")
-  def withTimeout(timeout: Int): WSRequestHolder =
-    this.withRequestTimeout(timeout)
-
-  /**
-   * Sets the maximum time in millisecond you accept the request to take.
-   * Warning: a stream consumption will be interrupted when this time is reached.
-   */
-  def withRequestTimeout(timeout: Int): WSRequestHolder =
-    this.copy(requestTimeout = Some(timeout))
-
-  def withVirtualHost(vh: String): WSRequestHolder = {
-    this.copy(virtualHost = Some(vh))
-  }
-
-  def withProxyServer(proxyServer: WSProxyServer): WSRequestHolder = {
-    this.copy(proxyServer = Some(proxyServer))
-  }
-
-  /**
-   * performs a get with supplied body
-   */
-
-  def get(): Future[NingWSResponse] = prepare("GET").execute
-
-  /**
-   * performs a get with supplied body
-   * @param consumer that's handling the response
-   */
-  def get[A](consumer: WSResponseHeaders => Iteratee[Array[Byte], A])(implicit ec: ExecutionContext): Future[Iteratee[Array[Byte], A]] =
-    prepare("GET").executeStream(consumer)
-
-  /**
-   * Perform a PATCH on the request asynchronously.
-   */
-  def patch[T](body: T)(implicit wrt: Writeable[T], ct: ContentTypeOf[T]): Future[NingWSResponse] = prepare("PATCH", body).execute
-
-  /**
-   * Perform a PATCH on the request asynchronously.
-   * Request body won't be chunked
-   */
-  def patch(body: File): Future[NingWSResponse] = prepare("PATCH", body).execute
-
-  /**
-   * performs a POST with supplied body
-   * @param consumer that's handling the response
-   */
-  def patchAndRetrieveStream[A, T](body: T)(consumer: WSResponseHeaders => Iteratee[Array[Byte], A])(implicit wrt: Writeable[T], ct: ContentTypeOf[T], ec: ExecutionContext): Future[Iteratee[Array[Byte], A]] = prepare("PATCH", body).executeStream(consumer)
-
-  /**
-   * Perform a POST on the request asynchronously.
-   */
-  def post[T](body: T)(implicit wrt: Writeable[T], ct: ContentTypeOf[T]): Future[NingWSResponse] = prepare("POST", body).execute
-
-  /**
-   * Perform a POST on the request asynchronously.
-   * Request body won't be chunked
-   */
-  def post(body: File): Future[NingWSResponse] = prepare("POST", body).execute
-
-  /**
-   * performs a POST with supplied body
-   * @param consumer that's handling the response
-   */
-  def postAndRetrieveStream[A, T](body: T)(consumer: WSResponseHeaders => Iteratee[Array[Byte], A])(implicit wrt: Writeable[T], ct: ContentTypeOf[T], ec: ExecutionContext): Future[Iteratee[Array[Byte], A]] = prepare("POST", body).executeStream(consumer)
-
-  /**
-   * Perform a PUT on the request asynchronously.
-   */
-  def put[T](body: T)(implicit wrt: Writeable[T], ct: ContentTypeOf[T]): Future[NingWSResponse] = prepare("PUT", body).execute
-
-  /**
-   * Perform a PUT on the request asynchronously.
-   * Request body won't be chunked
-   */
-  def put(body: File): Future[NingWSResponse] = prepare("PUT", body).execute
-
-  /**
-   * performs a PUT with supplied body
-   * @param consumer that's handling the response
-   */
-  def putAndRetrieveStream[A, T](body: T)(consumer: WSResponseHeaders => Iteratee[Array[Byte], A])(implicit wrt: Writeable[T], ct: ContentTypeOf[T], ec: ExecutionContext): Future[Iteratee[Array[Byte], A]] = prepare("PUT", body).executeStream(consumer)
-
-  /**
-   * Perform a DELETE on the request asynchronously.
-   */
-  def delete(): Future[NingWSResponse] = prepare("DELETE").execute
-
-  /**
-   * Perform a HEAD on the request asynchronously.
-   */
-  def head(): Future[NingWSResponse] = prepare("HEAD").execute
-
-  /**
-   * Perform a OPTIONS on the request asynchronously.
-   */
-  def options(): Future[NingWSResponse] = prepare("OPTIONS").execute
-
-  /**
-   * Execute an arbitrary method on the request asynchronously.
-   *
-   * @param method The method to execute
-   */
-  def execute(method: String): Future[WSResponse] = prepare(method).execute
-
-  private[play] def prepare(method: String): NingWSRequest = {
-    val request: NingWSRequest = new NingWSRequest(client, method, auth, calc, new RequestBuilder(method)).setUrl(url)
-      .setHeaders(headers)
-      .setQueryString(queryString)
-    followRedirects.map(request.setFollowRedirects)
-    requestTimeout.map {
-      t: Int =>
-        val config = new PerRequestConfig()
-        config.setRequestTimeoutInMs(t)
-        request.setPerRequestConfig(config)
-    }
-
-    virtualHost.map {
-      v =>
-        request.setVirtualHost(v)
-    }
-
-    prepareProxy(request)
-
-    request
-  }
-
-  private[play] def prepareProxy(request: NingWSRequest) {
-    proxyServer.map {
-      p =>
-        import com.ning.http.client.ProxyServer.Protocol
-        val protocol: Protocol = p.protocol.getOrElse("http").toLowerCase match {
-          case "http" => Protocol.HTTP
-          case "https" => Protocol.HTTPS
-          case "kerberos" => Protocol.KERBEROS
-          case "ntlm" => Protocol.NTLM
-          case "spnego" => Protocol.SPNEGO
-          case _ => scala.sys.error("Unrecognized protocol!")
-        }
-
-        val proxyServer = new AHCProxyServer(
-          protocol,
-          p.host,
-          p.port,
-          p.principal.getOrElse(null),
-          p.password.getOrElse(null))
-
-        p.encoding.map {
-          e =>
-            proxyServer.setEncoding(e)
-        }
-
-        p.nonProxyHosts.map {
-          nonProxyHosts =>
-            nonProxyHosts.foreach {
-              nonProxyHost =>
-                proxyServer.addNonProxyHost(nonProxyHost)
-            }
-        }
-
-        p.ntlmDomain.map {
-          ntlm =>
-            proxyServer.setNtlmDomain(ntlm)
-        }
-
-        request.setProxyServer(proxyServer)
-    }
-  }
-
-  private[play] def prepare(method: String, body: File): NingWSRequest = {
-    import com.ning.http.client.generators.FileBodyGenerator
-
-    val bodyGenerator = new FileBodyGenerator(body)
-
-    val request = new NingWSRequest(client, method, auth, calc, new RequestBuilder(method)).setUrl(url)
-      .setHeaders(headers)
-      .setQueryString(queryString)
-      .setBody(bodyGenerator)
-    followRedirects.map(request.setFollowRedirects)
-    requestTimeout.map {
-      t: Int =>
-        val config = new PerRequestConfig()
-        config.setRequestTimeoutInMs(t)
-        request.setPerRequestConfig(config)
-    }
-    virtualHost.map {
-      v =>
-        request.setVirtualHost(v)
-    }
-
-    prepareProxy(request)
-
-    request
-  }
-
-  private[play] def prepare[T](method: String, body: T)(implicit wrt: Writeable[T], ct: ContentTypeOf[T]): NingWSRequest = {
-    val request = new NingWSRequest(client, method, auth, calc, new RequestBuilder(method)).setUrl(url)
-      .setHeaders(Map("Content-Type" -> Seq(ct.mimeType.getOrElse("text/plain"))) ++ headers)
-      .setQueryString(queryString)
-      .setBody(wrt.transform(body))
-    followRedirects.map(request.setFollowRedirects)
-    requestTimeout.map {
-      t: Int =>
-        val config = new PerRequestConfig()
-        config.setRequestTimeoutInMs(t)
-        request.setPerRequestConfig(config)
-    }
-    virtualHost.map {
-      v =>
-        request.setVirtualHost(v)
-    }
-    prepareProxy(request)
-
-    request
   }
 }
 
-/**
- * WSPlugin implementation hook.
- */
-class NingWSPlugin(app: Application) extends WSPlugin {
-
-  @volatile var loaded = false
-
-  override lazy val enabled = true
-
-  override def onStart() {
-    loaded = true
-  }
-
-  override def onStop() {
-    if (loaded) {
-      ningAPI.resetClient()
-      loaded = false
-    }
-  }
-
-  def api = ningAPI
-
-  private lazy val ningAPI = new NingWSAPI(app)
-
+class WSClientProvider @Inject() (wsApi: WSAPI) extends Provider[WSClient] {
+  def get() = wsApi.client
 }
 
-class NingWSAPI(app: Application) extends WSAPI {
+@Singleton
+class NingWSAPI @Inject() (environment: Environment, clientConfig: NingWSClientConfig, lifecycle: ApplicationLifecycle) extends WSAPI {
 
-  import javax.net.ssl.SSLContext
+  private val logger = Logger(classOf[NingWSAPI])
 
-  private val clientHolder: AtomicReference[Option[NingWSClient]] = new AtomicReference(None)
-
-  private[play] def newClient(): NingWSClient = {
-    val playConfig = app.configuration
-    val asyncHttpConfig = new AsyncHttpClientConfig.Builder()
-      .setConnectionTimeoutInMs(playConfig.getMilliseconds("ws.timeout.connection").getOrElse(120000L).toInt)
-      .setIdleConnectionTimeoutInMs(playConfig.getMilliseconds("ws.timeout.idle").getOrElse(120000L).toInt)
-      .setRequestTimeoutInMs(playConfig.getMilliseconds("ws.timeout.request").getOrElse(120000L).toInt)
-      .setFollowRedirects(playConfig.getBoolean("ws.followRedirects").getOrElse(true))
-      .setUseProxyProperties(playConfig.getBoolean("ws.useProxyProperties").getOrElse(true))
-
-    playConfig.getString("ws.useragent").map {
-      useragent =>
-        asyncHttpConfig.setUserAgent(useragent)
-    }
-    if (!playConfig.getBoolean("ws.acceptAnyCertificate").getOrElse(false)) {
-      asyncHttpConfig.setSSLContext(SSLContext.getDefault)
-    }
-    new NingWSClient(asyncHttpConfig.build())
-  }
-
-  def client: NingWSClient = {
-    clientHolder.get.getOrElse({
-      // A critical section of code. Only one caller has the opportuntity of creating a new client.
-      synchronized {
-        clientHolder.get match {
-          case None => {
-            val client = newClient()
-            clientHolder.set(Some(client))
-            client
-          }
-          case Some(client) => client
-        }
-
+  lazy val client = {
+    if (clientConfig.wsClientConfig.ssl.debug.enabled) {
+      environment.mode match {
+        case Mode.Prod =>
+          logger.warn("NingWSAPI: ws.ssl.debug settings enabled in production mode!")
+        case _ => // do nothing
       }
-    })
+      new DebugConfiguration().configure(clientConfig.wsClientConfig.ssl.debug)
+    }
+
+    val client = NingWSClient(clientConfig)
+
+    lifecycle.addStopHook { () =>
+      Future.successful(client.close())
+    }
+    client
   }
 
   def url(url: String) = client.url(url)
-
-  /**
-   * resets the underlying AsyncHttpClient
-   */
-  private[play] def resetClient(): Unit = {
-    clientHolder.getAndSet(None).map(oldClient => oldClient.close())
-  }
 
 }
 
@@ -715,19 +522,19 @@ private class NingWSCookie(ahcCookie: AHCCookie) extends WSCookie {
   def path: String = ahcCookie.getPath
 
   /**
+   * The expiry date.
+   */
+  def expires: Option[Long] = if (ahcCookie.getExpires <= -1) None else Some(ahcCookie.getExpires)
+
+  /**
    * The maximum age.
    */
-  def maxAge: Int = ahcCookie.getMaxAge
+  def maxAge: Option[Int] = if (ahcCookie.getMaxAge <= -1) None else Some(ahcCookie.getMaxAge)
 
   /**
    * If the cookie is secure.
    */
   def secure: Boolean = ahcCookie.isSecure
-
-  /**
-   * The cookie version.
-   */
-  def version: Int = ahcCookie.getVersion
 
   /*
    * Cookie ports should not be used; cookies for a given host are shared across
@@ -742,14 +549,17 @@ private class NingWSCookie(ahcCookie: AHCCookie) extends WSCookie {
  */
 case class NingWSResponse(ahcResponse: AHCResponse) extends WSResponse {
 
-  import scala.xml._
   import play.api.libs.json._
 
+  import scala.xml._
+
   /**
-   * Get the underlying response object.
+   * Return the headers of the response as a case-insensitive map
    */
-  @deprecated("Use underlying", "2.3.0")
-  def getAHCResponse = ahcResponse
+  lazy val allHeaders: Map[String, Seq[String]] = {
+    TreeMap[String, Seq[String]]()(CaseInsensitiveOrdered) ++
+      mapAsScalaMapConverter(ahcResponse.getHeaders).asScala.mapValues(_.asScala)
+  }
 
   /**
    * @return The underlying response object.
@@ -775,7 +585,6 @@ case class NingWSResponse(ahcResponse: AHCResponse) extends WSResponse {
    * Get all the cookies.
    */
   def cookies: Seq[WSCookie] = {
-    import scala.collection.JavaConverters._
     ahcResponse.getCookies.asScala.map(new NingWSCookie(_))
   }
 
@@ -792,11 +601,11 @@ case class NingWSResponse(ahcResponse: AHCResponse) extends WSResponse {
     // explicitly set, while Plays default encoding is UTF-8.  So, use UTF-8 if charset is not explicitly
     // set and content type is not text/*, otherwise default to ISO-8859-1
     val contentType = Option(ahcResponse.getContentType).getOrElse("application/octet-stream")
-    val charset = Option(AsyncHttpProviderUtils.parseCharset(contentType)).getOrElse {
+    val charset: String = Option(AsyncHttpProviderUtils.parseCharset(contentType)).getOrElse {
       if (contentType.startsWith("text/"))
-        AsyncHttpProviderUtils.DEFAULT_CHARSET
+        AsyncHttpProviderUtils.DEFAULT_CHARSET.toString
       else
-        "utf-8"
+        StandardCharsets.UTF_8.toString
     }
     ahcResponse.getResponseBody(charset)
   }
@@ -811,4 +620,28 @@ case class NingWSResponse(ahcResponse: AHCResponse) extends WSResponse {
    */
   lazy val json: JsValue = Json.parse(ahcResponse.getResponseBodyAsBytes)
 
+  /**
+   * The response body as a byte array.
+   */
+  def bodyAsBytes: Array[Byte] = ahcResponse.getResponseBodyAsBytes
+
+  override def toString: String = {
+    s"NingWSResponse($status, $statusText)"
+  }
+}
+
+/**
+ * Ning WS API implementation components.
+ */
+trait NingWSComponents {
+
+  def environment: Environment
+  def configuration: Configuration
+  def applicationLifecycle: ApplicationLifecycle
+
+  lazy val wsClientConfig: WSClientConfig = new WSConfigParser(configuration, environment).parse()
+  lazy val ningWsClientConfig: NingWSClientConfig =
+    new NingWSClientConfigParser(wsClientConfig, configuration, environment).parse()
+  lazy val wsApi: WSAPI = new NingWSAPI(environment, ningWsClientConfig, applicationLifecycle)
+  lazy val wsClient: WSClient = wsApi.client
 }

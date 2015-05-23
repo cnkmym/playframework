@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.api.libs.iteratee
 
@@ -145,6 +145,47 @@ object Iteratee {
   def getChunks[E]: Iteratee[E, List[E]] = fold[E, List[E]](Nil) { (els, chunk) => chunk +: els }(dec).map(_.reverse)(dec)
 
   /**
+   * Read up to n chunks from the stream stopping when that number of chunks have
+   * been read or the stream end is reached. If the stream has fewer elements then
+   * only those elements are returned. Will consume intermediate Input.Empty elements
+   * but does not consume Input.EOF.
+   */
+  def takeUpTo[E](n: Int): Iteratee[E, Seq[E]] = {
+    def stepWith(accum: Seq[E]): Iteratee[E, Seq[E]] = {
+      if (accum.length >= n) Done(accum) else Cont {
+        case Input.EOF =>
+          Done(accum, Input.EOF)
+        case Input.Empty =>
+          stepWith(accum)
+        case Input.El(el) =>
+          stepWith(accum :+ el)
+      }
+    }
+    stepWith(Seq.empty)
+  }
+
+  /**
+   * Determines whether or not a stream contains any elements. A stream can be
+   * empty if it has no inputs (except Input.EOF) or if it consists of only Input.Empty
+   * elements (and Input.EOF.) A stream is non-empty if it contains an Input.El.
+   *
+   * This iteratee consumes the stream as far as the first EOF or Input.El, skipping
+   * over any Input.Empty elements. When it encounters an Input.EOF or Input.El it
+   * is Done.
+   *
+   * Will consume intermediate Input.Empty elements but does not consume Input.El or
+   * Input.EOF.
+   */
+  def isEmpty[E]: Iteratee[E, Boolean] = Cont {
+    case Input.EOF =>
+      Done(true, Input.EOF)
+    case Input.Empty =>
+      isEmpty[E]
+    case input @ Input.El(_) =>
+      Done(false, input)
+  }
+
+  /**
    * Ignore all the input of the stream, and return done when EOF is encountered.
    */
   def skipToEof[E]: Iteratee[E, Unit] = {
@@ -166,11 +207,11 @@ object Iteratee {
      * @tparam B Type of `otherwise`
      * @return An `Iteratee[E, Either[B, A]]` that consumes one input and produces a `Right(eofValue)` if this input is [[play.api.libs.iteratee.Input.EOF]] otherwise it produces a `Left(otherwise)`
      */
-    def apply[A, B](otherwise: B)(eofValue: A): Iteratee[E, Either[B, A]]
+    def apply[A, B](otherwise: => B)(eofValue: A): Iteratee[E, Either[B, A]]
   }
 
   def eofOrElse[E] = new EofOrElse[E] {
-    def apply[A, B](otherwise: B)(eofValue: A): Iteratee[E, Either[B, A]] = {
+    def apply[A, B](otherwise: => B)(eofValue: A): Iteratee[E, Either[B, A]] = {
       def cont: Iteratee[E, Either[B, A]] = Cont((in: Input[E]) => {
         in match {
           case Input.El(e) => Done(Left(otherwise), in)
@@ -263,7 +304,9 @@ object Input {
  */
 sealed trait Step[E, +A] {
 
-  lazy val it: Iteratee[E, A] = this match {
+  // This version is not called by Step implementations in Play,
+  // but could be called by custom implementations.
+  def it: Iteratee[E, A] = this match {
     case Step.Done(a, e) => Done(a, e)
     case Step.Cont(k) => Cont(k)
     case Step.Error(msg, e) => Error(msg, e)
@@ -405,11 +448,11 @@ trait Iteratee[E, +A] {
   /**
    * A version of `fold` that runs `folder` in the current thread rather than in a
    * supplied ExecutionContext, called in several places where we are sure the stack
-   * cannot overflow. This method is designed to be overridden by `ImmediateIteratee`,
+   * cannot overflow. This method is designed to be overridden by `StepIteratee`,
    * which can execute the `folder` function immediately.
    */
   protected[play] def foldNoEC[B](folder: Step[E, A] => Future[B]): Future[B] =
-    fold(folder)(Execution.overflowingExecutionContext)
+    fold(folder)(dec)
 
   /**
    * Like fold but taking functions returning pure values (not in promises)
@@ -421,11 +464,11 @@ trait Iteratee[E, +A] {
   /**
    * A version of `pureFold` that runs `folder` in the current thread rather than in a
    * supplied ExecutionContext, called in several places where we are sure the stack
-   * cannot overflow. This method is designed to be overridden by `ImmediateIteratee`,
+   * cannot overflow. This method is designed to be overridden by `StepIteratee`,
    * which can execute the `folder` function immediately.
    */
   protected[play] def pureFoldNoEC[B](folder: Step[E, A] => B): Future[B] =
-    pureFold(folder)(Execution.overflowingExecutionContext)
+    pureFold(folder)(dec)
 
   /**
    * Like pureFold, except taking functions that return an Iteratee
@@ -437,11 +480,11 @@ trait Iteratee[E, +A] {
   /**
    * A version of `pureFlatFold` that runs `folder` in the current thread rather than in a
    * supplied ExecutionContext, called in several places where we are sure the stack
-   * cannot overflow. This method is designed to be overridden by `ImmediateIteratee`,
+   * cannot overflow. This method is designed to be overridden by `StepIteratee`,
    * which can execute the `folder` function immediately.
    */
   protected[play] def pureFlatFoldNoEC[B, C](folder: Step[E, A] => Iteratee[B, C]): Iteratee[B, C] =
-    pureFlatFold(folder)(Execution.overflowingExecutionContext)
+    pureFlatFold(folder)(dec)
 
   /**
    * Like fold, except flattens the result with Iteratee.flatten.
@@ -498,7 +541,7 @@ trait Iteratee[E, +A] {
       }(dec)
       case Step.Cont(k) => {
         implicit val pec = ec.prepare()
-        Cont((in: Input[E]) => k(in).flatMap(f)(pec))
+        Cont((in: Input[E]) => executeIteratee(k(in))(dec).flatMap(f)(pec))
       }
       case Step.Error(msg, e) => Error(msg, e)
     }
@@ -548,6 +591,73 @@ trait Iteratee[E, +A] {
     }(dec)
   }
 
+  /**
+   * Creates a new Iteratee that will handle any matching exception the original Iteratee may contain. This lets you
+   * provide a fallback value in case your Iteratee ends up in an error state.
+   *
+   * Example:
+   *
+   * {{{
+   * def it = Iteratee.map(i => 10 / i).recover { case t: Throwable =>
+   *   Logger.error("Must have divided by zero!", t)
+   *   Integer.MAX_VALUE
+   * }
+   *
+   * Enumerator(5).run(it) // => 2
+   * Enumerator(0).run(it) // => returns Integer.MAX_VALUE and logs "Must have divied by zero!"
+   * }}}
+   *
+   * @param pf
+   * @param ec
+   * @tparam B
+   * @return
+   */
+  def recover[B >: A](pf: PartialFunction[Throwable, B])(implicit ec: ExecutionContext): Iteratee[E, B] = {
+    recoverM { case t: Throwable if pf.isDefinedAt(t) => Future.successful(pf(t)) }(ec)
+  }
+
+  /**
+   * A version of `recover` that allows the partial function to return a Future[B] instead of B.
+   *
+   * @param pf
+   * @param ec
+   * @tparam B
+   * @return
+   */
+  def recoverM[B >: A](pf: PartialFunction[Throwable, Future[B]])(implicit ec: ExecutionContext): Iteratee[E, B] = {
+    val pec = ec.prepare()
+    recoverWith { case t: Throwable if pf.isDefinedAt(t) => Iteratee.flatten(pf(t).map(b => Done[E, B](b))(pec)) }(ec)
+  }
+
+  /**
+   * A version of `recover` that allows the partial function to return an Iteratee[E, B] instead of B.
+   *
+   * @param pf
+   * @param ec
+   * @tparam B
+   * @return
+   */
+  def recoverWith[B >: A](pf: PartialFunction[Throwable, Iteratee[E, B]])(implicit ec: ExecutionContext): Iteratee[E, B] = {
+    implicit val pec = ec.prepare()
+
+    def recoveringIteratee(it: Iteratee[E, A]): Iteratee[E, B] = {
+      val futureRecoveringIteratee: Future[Iteratee[E, B]] = it.pureFlatFold[E, B] {
+        case Step.Cont(k) =>
+          Cont { input: Input[E] =>
+            val orig: Iteratee[E, A] = k(input)
+            val recovering: Iteratee[E, B] = recoveringIteratee(orig)
+            recovering
+          }
+        case Step.Error(msg, _) =>
+          throw new IterateeException(msg)
+        case done => done.it
+      }(dec).unflatten.map(_.it)(dec).recover(pf)(pec)
+      Iteratee.flatten(futureRecoveringIteratee)
+    }
+
+    recoveringIteratee(this)
+  }
+
   def joinI[AIn](implicit in: A <:< Iteratee[_, AIn]): Iteratee[E, AIn] = {
     this.flatMap { a =>
       val inner = in(a)
@@ -584,9 +694,10 @@ trait Iteratee[E, +A] {
  * Several performance improvements are possible when an iteratee's
  * state is immediately available.
  */
-private trait ImmediateIteratee[E, A] extends Iteratee[E, A] {
+private sealed trait StepIteratee[E, A] extends Iteratee[E, A] with Step[E, A] {
 
-  def immediateUnflatten: Step[E, A]
+  final override def it: Iteratee[E, A] = this
+  final def immediateUnflatten: Step[E, A] = this
 
   final override def unflatten: Future[Step[E, A]] = Future.successful(immediateUnflatten)
 
@@ -619,8 +730,7 @@ private trait ImmediateIteratee[E, A] extends Iteratee[E, A] {
 /**
  * An iteratee in the "done" state.
  */
-private final class DoneIteratee[E, A](a: A, e: Input[E]) extends ImmediateIteratee[E, A] {
-  def immediateUnflatten = Step.Done(a, e)
+private final class DoneIteratee[E, A](a: A, e: Input[E]) extends Step.Done[A, E](a, e) with StepIteratee[E, A] {
 
   /**
    * Use an optimized implementation because this method is called by Play when running an
@@ -628,7 +738,7 @@ private final class DoneIteratee[E, A](a: A, e: Input[E]) extends ImmediateItera
    */
   override def mapM[B](f: A => Future[B])(implicit ec: ExecutionContext): Iteratee[E, B] = {
     Iteratee.flatten(executeFuture {
-      f(a).map[Iteratee[E, B]](Done(_, e))(Execution.overflowingExecutionContext)
+      f(a).map[Iteratee[E, B]](Done(_, e))(dec)
     }(ec /* delegate preparation */ ))
   }
 
@@ -637,26 +747,24 @@ private final class DoneIteratee[E, A](a: A, e: Input[E]) extends ImmediateItera
 /**
  * An iteratee in the "cont" state.
  */
-private final class ContIteratee[E, A](k: Input[E] => Iteratee[E, A]) extends ImmediateIteratee[E, A] {
-  def immediateUnflatten = Step.Cont(k)
+private final class ContIteratee[E, A](k: Input[E] => Iteratee[E, A]) extends Step.Cont[E, A](k) with StepIteratee[E, A] {
 }
 
 /**
  * An iteratee in the "error" state.
  */
-private final class ErrorIteratee[E](msg: String, e: Input[E]) extends ImmediateIteratee[E, Nothing] {
-  def immediateUnflatten = Step.Error(msg, e)
+private final class ErrorIteratee[E](msg: String, e: Input[E]) extends Step.Error[E](msg, e) with StepIteratee[E, Nothing] {
 }
 
 /**
- * An iteratee whose state is provided in a Future, vs [[ImmediateIteratee]].
+ * An iteratee whose state is provided in a Future, vs [[StepIteratee]].
  * Used by `Iteratee.flatten`.
  */
 private final class FutureIteratee[E, A](itFut: Future[Iteratee[E, A]]) extends Iteratee[E, A] {
 
   def fold[B](folder: Step[E, A] => Future[B])(implicit ec: ExecutionContext): Future[B] = {
     implicit val pec = ec.prepare()
-    itFut.flatMap { it => it.fold(folder)(pec) }(Execution.overflowingExecutionContext)
+    itFut.flatMap { it => it.fold(folder)(pec) }(dec)
   }
 
 }
@@ -689,3 +797,17 @@ object Error {
    */
   def apply[E](msg: String, e: Input[E]): Iteratee[E, Nothing] = new ErrorIteratee[E](msg, e)
 }
+
+/**
+ * An Exception that represents an Iteratee that ended up in an Error state with the given
+ * error message. This exception will eventually be removed and replaced with
+ * `IterateeException` (notice the extra `c`).
+ */
+@deprecated("Use IterateeException instead (notice the extra 'c')", "2.4.0")
+class IterateeExeption(msg: String) extends Exception(msg)
+
+/**
+ * An Exception that represents an Iteratee that ended up in an Error state with the given
+ * error message.
+ */
+class IterateeException(msg: String) extends IterateeExeption(msg)

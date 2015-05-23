@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.api.libs.json
 
@@ -18,15 +18,9 @@ sealed trait PathNode {
 
 case class RecursiveSearch(key: String) extends PathNode {
   def apply(json: JsValue): List[JsValue] = json match {
-    case obj: JsObject => (json \\ key).toList.filterNot {
-      case JsUndefined() => true
-      case _ => false
-    }
-    case arr: JsArray => (json \\ key).toList.filterNot {
-      case JsUndefined() => true
-      case _ => false
-    }
-    case _ => List()
+    case obj: JsObject => (json \\ key).toList
+    case arr: JsArray => (json \\ key).toList
+    case _ => Nil
   }
   override def toString = "//" + key
   def toJsonString = "*" + key
@@ -65,10 +59,7 @@ case class RecursiveSearch(key: String) extends PathNode {
 case class KeyPathNode(key: String) extends PathNode {
 
   def apply(json: JsValue): List[JsValue] = json match {
-    case obj: JsObject => List(json \ key).filterNot {
-      case JsUndefined() => true
-      case _ => false
-    }
+    case obj: JsObject => List(json \ key).flatMap(_.toOption)
     case _ => List()
   }
 
@@ -105,7 +96,7 @@ case class KeyPathNode(key: String) extends PathNode {
 
 case class IdxPathNode(idx: Int) extends PathNode {
   def apply(json: JsValue): List[JsValue] = json match {
-    case arr: JsArray => List(arr(idx))
+    case arr: JsArray => List(arr(idx)).flatMap(_.toOption)
     case _ => List()
   }
 
@@ -181,9 +172,9 @@ case class JsPath(path: List[PathNode] = List()) {
     case _ :: _ => JsError(Seq(this -> Seq(ValidationError("error.path.result.multiple"))))
   }
 
-  def asSingleJson(json: JsValue): JsValue = this(json) match {
+  def asSingleJson(json: JsValue): JsLookupResult = this(json) match {
     case Nil => JsUndefined("error.path.missing")
-    case List(js) => js
+    case List(js) => JsDefined(js)
     case _ :: _ => JsUndefined("error.path.result.multiple")
   }
 
@@ -249,7 +240,10 @@ case class JsPath(path: List[PathNode] = List()) {
     }
 
     js match {
-      case o: JsObject => step(o, this)
+      case o: JsObject => step(o, this) match {
+        case s: JsSuccess[JsObject] => s.copy(path = this)
+        case e => e
+      }
       case _ =>
         JsError(this, ValidationError("error.expected.jsobject"))
     }
@@ -257,14 +251,6 @@ case class JsPath(path: List[PathNode] = List()) {
 
   /** Reads a T at JsPath */
   def read[T](implicit r: Reads[T]): Reads[T] = Reads.at[T](this)(r)
-
-  /**
-   * Reads optional field at JsPath.
-   * If JsPath is not found => None
-   * If JsPath is found => applies implicit Reads[T]
-   */
-  @deprecated("use readNullable[T] instead (which manages both missing and null fields)", since = "2.1-RC2")
-  def readOpt[T](implicit r: Reads[T]): Reads[Option[T]] = Reads.optional[T](this)(r)
 
   /**
    * Reads a Option[T] search optional or nullable field at JsPath (field not found or null is None
@@ -316,14 +302,6 @@ case class JsPath(path: List[PathNode] = List()) {
 
   /** Writes a T at given JsPath */
   def write[T](implicit w: Writes[T]): OWrites[T] = Writes.at[T](this)(w)
-
-  /**
-   * Writes a Option[T] at given JsPath
-   * If None => doesn't write the field
-   * else => writes the field using implicit Writes[T]
-   */
-  @deprecated("use writeNullable[T] instead (in parallel with readNullable)", since = "2.1-RC2")
-  def writeOpt[T](implicit w: Writes[T]): OWrites[Option[T]] = Writes.optional[T](this)(w)
 
   /**
    * Writes a Option[T] at given JsPath
@@ -382,15 +360,6 @@ case class JsPath(path: List[PathNode] = List()) {
    * Please note we couldn't call it "format" to prevent conflicts
    */
   def rw[T](implicit r: Reads[T], w: Writes[T]): OFormat[T] = Format.at[T](this)(Format(r, w))
-
-  /**
-   * Reads/Writes a Option[T] at given JsPath
-   *
-   * @see JsPath.readOpt to see behavior in reads
-   * @see JsPath.writeOpt to see behavior in writes
-   */
-  @deprecated("use formatNullable[T] instead (in parallel with readNullable)", since = "2.1-RC2")
-  def formatOpt[T](implicit f: Format[T]): OFormat[Option[T]] = Format.optional[T](this)(f)
 
   /**
    * Reads/Writes a Option[T] (optional or nullable field) at given JsPath

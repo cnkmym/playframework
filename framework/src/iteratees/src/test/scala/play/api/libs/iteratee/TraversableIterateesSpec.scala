@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.api.libs.iteratee
 
@@ -8,7 +8,7 @@ import scala.concurrent.{ Await, Future }
 import scala.concurrent.duration.Duration
 
 object TraversableIterateesSpec extends Specification
-  with IterateeSpecification with ExecutionSpecification {
+    with IterateeSpecification with ExecutionSpecification {
 
   "Traversable.splitOnceAt" should {
 

@@ -1,10 +1,10 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.it.http
 
 import java.net.Socket
-import java.io.{InputStreamReader, BufferedReader, OutputStreamWriter}
+import java.io.{ InputStreamReader, BufferedReader, OutputStreamWriter }
 import play.api.test.Helpers._
 import org.apache.commons.io.IOUtils
 
@@ -80,7 +80,7 @@ class BasicHttpClient(port: Int) {
    *         them
    */
   def sendRequest(request: BasicRequest, requestDesc: String, waitForResponses: Boolean = true,
-                  trickleFeed: Option[Long] = None): Seq[BasicResponse] = {
+    trickleFeed: Option[Long] = None): Seq[BasicResponse] = {
     out.write(s"${request.method} ${request.uri} ${request.version}\r\n")
     out.write("Host: localhost\r\n")
     request.headers.foreach { header =>
@@ -134,6 +134,9 @@ class BasicHttpClient(port: Int) {
     try {
       // Read status line
       val statusLine = reader.readLine()
+      if (statusLine == null) {
+        throw new RuntimeException(s"No response $responseDesc: EOF reached")
+      }
       val (version, status, reasonPhrase) = statusLine.split(" ", 3) match {
         case Array(v, s, r) => (v, s.toInt, r)
         case Array(v, s) => (v, s.toInt, "")
@@ -207,7 +210,6 @@ class BasicHttpClient(port: Int) {
   }
 }
 
-
 /**
  * A basic response
  *
@@ -219,7 +221,7 @@ class BasicHttpClient(port: Int) {
  *             trailers
  */
 case class BasicResponse(version: String, status: Int, reasonPhrase: String, headers: Map[String, String],
-                         body: Either[String, (Seq[String], Map[String, String])])
+  body: Either[String, (Seq[String], Map[String, String])])
 
 /**
  * A basic request

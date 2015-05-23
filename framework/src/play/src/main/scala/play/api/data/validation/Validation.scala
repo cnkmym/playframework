@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.api.data.validation
 
@@ -73,7 +73,7 @@ trait Constraints {
    * '''name'''[constraint.email]
    * '''error'''[error.email]
    */
-  private val emailRegex = """^(?!\.)("([^"\r\\]|\\["\r\\])*"|([-a-zA-Z0-9!#$%&'*+/=?^_`{|}~]|(?<!\.)\.)*)(?<!\.)@[a-zA-Z0-9][\w\.-]*[a-zA-Z0-9]\.[a-zA-Z][a-zA-Z\.]*[a-zA-Z]$""".r
+  private val emailRegex = """^[a-zA-Z0-9\.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$""".r
   def emailAddress: Constraint[String] = Constraint[String]("constraint.email") { e =>
     if (e == null) Invalid(ValidationError("error.email"))
     else if (e.trim.isEmpty) Invalid(ValidationError("error.email"))
@@ -207,3 +207,21 @@ object Invalid {
   def apply(error: String, args: Any*): Invalid = Invalid(Seq(ValidationError(error, args: _*)))
 }
 
+object ParameterValidator {
+  def apply[T](constraints: Iterable[Constraint[T]], optionalParam: Option[T]*) =
+    optionalParam.flatMap {
+      _.map { param =>
+        constraints.flatMap {
+          _(param) match {
+            case i: Invalid => Some(i)
+            case _ => None
+          }
+        }
+      }
+    }.flatten match {
+      case Nil => Valid
+      case invalids => invalids.reduceLeft {
+        (a, b) => a ++ b
+      }
+    }
+}

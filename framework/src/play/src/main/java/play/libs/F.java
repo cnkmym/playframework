@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2013 Typesafe Inc. <http://www.typesafe.com>
+ * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
  */
 package play.libs;
 
@@ -77,6 +77,13 @@ public class F {
     }
 
     /**
+     * A Predicate (boolean-valued function) with a single argument.
+     */
+    public static interface Predicate<A> {
+        public boolean test(A a) throws Throwable;
+    }
+
+    /**
      * A promise to produce a result of type <code>A</code>.
      */
     public static class Promise<A> {
@@ -87,10 +94,8 @@ public class F {
          * Creates a Promise that wraps a Scala Future.
          *
          * @param future The Scala Future to wrap
-         * @deprecated Since 2.2. Use {@link #wrap(Future)} instead.
          */
-        @Deprecated
-        public Promise(Future<A> future) {
+        private Promise(Future<A> future) {
             this.future = future;
         }
 
@@ -112,7 +117,7 @@ public class F {
          * @param promises The promises to combine
          * @return A single promise whose methods act on the list of redeemed promises
          */
-        public static <A> Promise<List<A>> sequence(Promise<? extends A>... promises){
+        public static <A> Promise<List<A>> sequence(Promise<A>... promises){
             return FPromiseHelper.<A>sequence(java.util.Arrays.asList(promises), HttpExecution.defaultContext());
         }
 
@@ -123,7 +128,7 @@ public class F {
          * @param promises The promises to combine
          * @return A single promise whose methods act on the list of redeemed promises
          */
-        public static <A> Promise<List<A>> sequence(ExecutionContext ec, Promise<? extends A>... promises){
+        public static <A> Promise<List<A>> sequence(ExecutionContext ec, Promise<A>... promises){
             return FPromiseHelper.<A>sequence(java.util.Arrays.asList(promises), ec);
         }
 
@@ -149,8 +154,8 @@ public class F {
         }
 
         /**
-         * Create a Promise timer that throws a TimeoutException after a
-         * given timeout.
+         * Create a Promise timer that throws a PromiseTimeoutException after
+         * a given timeout.
          *
          * The returned Promise is usually combined with other Promises.
          *
@@ -162,8 +167,8 @@ public class F {
         }
 
         /**
-         * Create a Promise timer that throws a TimeoutException after a
-         * given timeout.
+         * Create a Promise timer that throws a PromiseTimeoutException after
+         * a given timeout.
          *
          * The returned Promise is usually combined with other Promises.
          *
@@ -183,7 +188,7 @@ public class F {
          * @param promises The promises to combine
          * @return A single promise whose methods act on the list of redeemed promises
          */
-        public static <A> Promise<List<A>> sequence(Iterable<Promise<? extends A>> promises){
+        public static <A> Promise<List<A>> sequence(Iterable<Promise<A>> promises){
             return FPromiseHelper.<A>sequence(promises, HttpExecution.defaultContext());
         }
 
@@ -194,7 +199,7 @@ public class F {
          * @param ec Used to execute the sequencing operations.
          * @return A single promise whose methods act on the list of redeemed promises
          */
-        public static <A> Promise<List<A>> sequence(Iterable<Promise<? extends A>> promises, ExecutionContext ec){
+        public static <A> Promise<List<A>> sequence(Iterable<Promise<A>> promises, ExecutionContext ec){
             return FPromiseHelper.<A>sequence(promises, ec);
         }
 
@@ -269,6 +274,7 @@ public class F {
          *
          * @param timeout A user defined timeout
          * @param unit timeout for timeout
+         * @throws PromiseTimeoutException when the promise did timeout.
          * @return The promised result
          *
          */
@@ -281,6 +287,7 @@ public class F {
          * Throws a Throwable if the calculation providing the promise threw an exception
          *
          * @param timeout A user defined timeout in milliseconds
+         * @throws PromiseTimeoutException when the promise did timeout.
          * @return The promised result
          */
         public A get(long timeout) {
@@ -289,7 +296,7 @@ public class F {
 
         /**
          * combines the current promise with <code>another</code> promise using `or`
-         * @param another 
+         * @param another
          */
         public <B> Promise<Either<A,B>> or(Promise<B> another) {
             return FPromiseHelper.or(this, another);
@@ -297,7 +304,7 @@ public class F {
 
         /**
          * Perform the given <code>action</code> callback when the Promise is redeemed.
-         * 
+         *
          * The callback will be run in the default execution context.
          *
          * @param action The action to perform.
@@ -369,6 +376,41 @@ public class F {
         }
 
         /**
+         * Creates a new promise that will handle thrown exceptions by assigning to the value of another promise.
+         *
+         * The function will be run in the default execution context.
+         *
+         * @param function The function to handle the exception, and which returns another promise
+         * @return A promise that will delegate to another promise on failure
+         */
+        public Promise<A> recoverWith(final Function<Throwable, Promise<A>> function) {
+            return FPromiseHelper.recoverWith(this, function, HttpExecution.defaultContext());
+        }
+
+        /**
+         * Creates a new promise that will handle thrown exceptions by assigning to the value of another promise.
+         *
+         * @param function The function to handle the exception, and which returns another promise
+         * @param ec The ExecutionContext to execute the function in
+         * @return A promise that will delegate to another promise on failure
+         */
+        public Promise<A> recoverWith(final Function<Throwable, Promise<A>> function, ExecutionContext ec) {
+            return FPromiseHelper.recoverWith(this, function, ec);
+        }
+
+        /**
+         * Creates a new promise which holds the result of this promise if it was completed successfully,
+         * otherwise the result of the {@code fallback} promise if it completed successfully.
+         * If both promises failed, the resulting promise holds the throwable of this promise.
+         *
+         * @param fallback The promise to fallback to if this promise has failed
+         * @return A promise that will delegate to another promise on failure
+         */
+        public Promise<A> fallbackTo(final Promise<A> fallback) {
+            return FPromiseHelper.fallbackTo(this, fallback);
+        }
+
+        /**
          * Perform the given <code>action</code> callback if the promise encounters an exception.
          *
          * This action will be run in the default exceution context.
@@ -412,6 +454,56 @@ public class F {
          */
         public <B> Promise<B> flatMap(final Function<? super A,Promise<B>> function, ExecutionContext ec) {
             return FPromiseHelper.flatMap(this, function, ec);
+        }
+
+        /**
+         * Creates a new promise by filtering the value of the current promise with a predicate.
+         * If the predicate fails, the resulting promise will fail with a `NoSuchElementException`.
+         *
+         * @param predicate The predicate to test the current value.
+         * @return A new promise with the current value, if the predicate is satisfied.
+         */
+        public Promise<A> filter(final Predicate<? super A> predicate) {
+            return FPromiseHelper.filter(this, predicate, HttpExecution.defaultContext());
+        }
+
+        /**
+         * Creates a new promise by filtering the value of the current promise with a predicate.
+         * If the predicate fails, the resulting promise will fail with a `NoSuchElementException`.
+         *
+         * @param predicate The predicate to test the current value.
+         * @param ec The ExecutionContext to execute the filtering in.
+         * @return A new promise with the current value, if the predicate is satisfied.
+         */
+        public Promise<A> filter(final Predicate<? super A> predicate, ExecutionContext ec) {
+            return FPromiseHelper.filter(this, predicate, ec);
+        }
+
+        /**
+         * Creates a new promise by applying the {@code onSuccess} function to a successful result,
+         * or the {@code onFailure} function to a failed result.
+         *
+         * The function will be run in the default execution context.
+         *
+         * @param onSuccess The function to map a successful result from {@code A} to {@code B}
+         * @param onFailure The function to map the {@code Throwable} when failed
+         * @return A new promise mapped by either the {@code onSuccess} or {@code onFailure} functions
+         */
+        public <B> Promise<B> transform(final Function<? super A, B> onSuccess, final Function<Throwable, Throwable> onFailure) {
+            return FPromiseHelper.transform(this, onSuccess, onFailure, HttpExecution.defaultContext());
+        }
+
+        /**
+         * Creates a new promise by applying the {@code onSuccess} function to a successful result,
+         * or the {@code onFailure} function to a failed result.
+         *
+         * @param onSuccess The function to map a successful result from {@code A} to {@code B}
+         * @param onFailure The function to map the {@code Throwable} when failed
+         * @param ec The ExecutionContext to execute functions in
+         * @return A new promise mapped by either the {@code onSuccess} or {@code onFailure} functions
+         */
+        public <B> Promise<B> transform(final Function<? super A, B> onSuccess, final Function<Throwable, Throwable> onFailure, ExecutionContext ec) {
+            return FPromiseHelper.transform(this, onSuccess, onFailure, ec);
         }
 
         /**
@@ -550,6 +642,19 @@ public class F {
 
 
     /**
+     * Exception thrown when an operation times out. This class provides an
+     * unchecked alternative to Java's TimeoutException.
+     */
+    public static class PromiseTimeoutException extends RuntimeException {
+        public PromiseTimeoutException(String message) {
+            super(message);
+        }
+        public PromiseTimeoutException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+
+    /**
      * Represents optional values. Instances of <code>Option</code> are either an instance of <code>Some</code> or the object <code>None</code>.
      */
     public static abstract class Option<T> implements Collection<T> {
@@ -657,6 +762,19 @@ public class F {
         @Override
         public boolean addAll(Collection<? extends T> c) {
             throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public int hashCode() {
+            return Arrays.deepHashCode(this.toArray());
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+            if (this == obj) return true;
+            if (obj == null) return false;
+            if (!(obj instanceof Option)) return false;
+            return Arrays.deepEquals(this.toArray(), ((Option)obj).toArray());
         }
 
     }
@@ -861,6 +979,28 @@ public class F {
         public String toString() {
             return "Tuple2(_1: " + _1 + ", _2: " + _2 + ")";
         }
+
+        @Override
+        public int hashCode() {
+            final int prime = 31;
+            int result = 1;
+            result = prime * result + ((_1 == null) ? 0 : _1.hashCode());
+            result = prime * result + ((_2 == null) ? 0 : _2.hashCode());
+            return result;
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+            if (this == obj) return true;
+            if (obj == null) return false;
+            if (!(obj instanceof Tuple)) return false;
+            Tuple other = (Tuple) obj;
+            if (_1 == null) { if (other._1 != null) return false; }
+            else if (!_1.equals(other._1)) return false;
+            if (_2 == null) { if (other._2 != null) return false; }
+            else if (!_2.equals(other._2)) return false;
+            return true;
+        }
     }
 
     /**
@@ -892,6 +1032,31 @@ public class F {
         @Override
         public String toString() {
             return "Tuple3(_1: " + _1 + ", _2: " + _2 + ", _3:" + _3 + ")";
+        }
+
+        @Override
+        public int hashCode() {
+            final int prime = 31;
+            int result = 1;
+            result = prime * result + ((_1 == null) ? 0 : _1.hashCode());
+            result = prime * result + ((_2 == null) ? 0 : _2.hashCode());
+            result = prime * result + ((_3 == null) ? 0 : _3.hashCode());
+            return result;
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+            if (this == obj) return true;
+            if (obj == null) return false;
+            if (!(obj instanceof Tuple3)) return false;
+            Tuple3 other = (Tuple3) obj;
+            if (_1 == null) { if (other._1 != null) return false; }
+            else if (!_1.equals(other._1)) return false;
+            if (_2 == null) { if (other._2 != null) return false; }
+            else if (!_2.equals(other._2)) return false;
+            if (_3 == null) { if (other._3 != null) return false; }
+            else if (!_3.equals(other._3)) return false;
+            return true;
         }
     }
 
@@ -927,6 +1092,32 @@ public class F {
         @Override
         public String toString() {
             return "Tuple4(_1: " + _1 + ", _2: " + _2 + ", _3:" + _3 + ", _4:" + _4 + ")";
+        }
+
+        public int hashCode() {
+            final int prime = 31;
+            int result = 1;
+            result = prime * result + ((_1 == null) ? 0 : _1.hashCode());
+            result = prime * result + ((_2 == null) ? 0 : _2.hashCode());
+            result = prime * result + ((_3 == null) ? 0 : _3.hashCode());
+            result = prime * result + ((_4 == null) ? 0 : _4.hashCode());
+            return result;
+        }
+
+        public boolean equals(Object obj) {
+            if (this == obj) return true;
+            if (obj == null) return false;
+            if (!(obj instanceof Tuple4)) return false;
+            Tuple4 other = (Tuple4) obj;
+            if (_1 == null) { if (other._1 != null) return false; }
+            else if (!_1.equals(other._1)) return false;
+            if (_2 == null) { if (other._2 != null) return false; }
+            else if (!_2.equals(other._2)) return false;
+            if (_3 == null) { if (other._3 != null) return false; }
+            else if (!_3.equals(other._3)) return false;
+            if (_4 == null) { if (other._4 != null) return false; }
+            else if (!_4.equals(other._4)) return false;
+            return true;
         }
     }
 
@@ -965,6 +1156,35 @@ public class F {
         @Override
         public String toString() {
             return "Tuple5(_1: " + _1 + ", _2: " + _2 + ", _3:" + _3 + ", _4:" + _4 + ", _5:" + _5 + ")";
+        }
+
+        public int hashCode() {
+            final int prime = 31;
+            int result = 1;
+            result = prime * result + ((_1 == null) ? 0 : _1.hashCode());
+            result = prime * result + ((_2 == null) ? 0 : _2.hashCode());
+            result = prime * result + ((_3 == null) ? 0 : _3.hashCode());
+            result = prime * result + ((_4 == null) ? 0 : _4.hashCode());
+            result = prime * result + ((_5 == null) ? 0 : _5.hashCode());
+            return result;
+        }
+
+        public boolean equals(Object obj) {
+            if (this == obj) return true;
+            if (obj == null) return false;
+            if (!(obj instanceof Tuple5)) return false;
+            Tuple5 other = (Tuple5) obj;
+            if (_1 == null) { if (other._1 != null) return false; }
+            else if (!_1.equals(other._1)) return false;
+            if (_2 == null) { if (other._2 != null) return false; }
+            else if (!_2.equals(other._2)) return false;
+            if (_3 == null) { if (other._3 != null) return false; }
+            else if (!_3.equals(other._3)) return false;
+            if (_4 == null) { if (other._4 != null) return false; }
+            else if (!_4.equals(other._4)) return false;
+            if (_5 == null) { if (other._5 != null) return false; }
+            else if (!_5.equals(other._5)) return false;
+            return true;
         }
     }
 
